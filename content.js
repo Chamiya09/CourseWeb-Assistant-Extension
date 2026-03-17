@@ -117,17 +117,39 @@
   };
 
 
-  // Text phrases that mean the item is already submitted — these get skipped.
-  const SUBMITTED_PHRASES = [
+  // Exact text strings that confirm an assignment is ALREADY submitted.
+  // Any element whose text contains one of these is skipped entirely.
+  const SKIP_PHRASES = [
+    "edit submission",
+    "remove submission",
     "submitted for grading",
     "submission received",
-    "graded",
-    "not open",
   ];
 
-  function isSubmitted(element) {
+  /**
+   * Returns true if the container element shows any sign that
+   * the user has already submitted this assignment.
+   */
+  function isAlreadySubmitted(element) {
     const text = element.textContent.toLowerCase();
-    return SUBMITTED_PHRASES.some((phrase) => text.includes(phrase));
+    return SKIP_PHRASES.some((phrase) => text.includes(phrase));
+  }
+
+  /**
+   * Returns true ONLY if the container contains a button/link/div
+   * whose trimmed text is exactly "Add submission" (case-insensitive).
+   * This is the definitive signal that the assignment is still pending.
+   */
+  function hasPendingSubmissionButton(element) {
+    // Cast a wide net: buttons, anchor tags, input buttons, and any div/span
+    const candidates = element.querySelectorAll(
+      'button, a, input[type="button"], input[type="submit"], [role="button"], .btn'
+    );
+    for (const el of candidates) {
+      const label = el.textContent.trim().toLowerCase();
+      if (label === "add submission") return true;
+    }
+    return false;
   }
 
   // How long each deadline "window" is (used to calculate progress %).
@@ -141,7 +163,7 @@
   // 1.  DATA SCRAPING
   // ─────────────────────────────────────────────────────────
   function scrapeDeadlines() {
-    console.group("[CWA] scrapeDeadlines() — multi-strategy scan");
+    console.group("[CWA] scrapeDeadlines() — 'Add submission' filter mode");
     console.log("[CWA] Page:", location.href);
 
     const deadlines = [];
@@ -162,12 +184,27 @@
       containers.forEach((item, idx) => {
         console.group(`[CWA] Item #${idx}`, item);
 
-        if (isSubmitted(item)) {
-          console.log("[CWA] SKIPPED — element contains a submitted/graded phrase.");
+        // ── Gate 1: skip if already submitted ─────────────
+        if (isAlreadySubmitted(item)) {
+          console.log(
+            "[CWA] SKIPPED — found 'Edit submission', 'Remove submission', " +
+            "or 'Submitted for grading' text inside this element."
+          );
           console.groupEnd();
           return;
         }
 
+        // ── Gate 2: only proceed if 'Add submission' button exists ──
+        const isPending = hasPendingSubmissionButton(item);
+        console.log(
+          `[CWA] 'Add submission' button: ${isPending ? "FOUND — assignment is pending" : "NOT FOUND — skipping"}`
+        );
+        if (!isPending) {
+          console.groupEnd();
+          return;
+        }
+
+        // ── Extract label and due date ─────────────────────
         const nameEl = item.querySelector(strategy.label);
         const dateEl = item.querySelector(strategy.date);
 
@@ -175,7 +212,7 @@
         console.log("[CWA] Date el  :", dateEl ? `"${dateEl.textContent.trim()}"` : `NOT FOUND (selector: '${strategy.date}')`);
 
         if (!nameEl || !dateEl) {
-          console.log("[CWA] SKIPPED — missing label or date element.");
+          console.log("[CWA] SKIPPED — could not find label or date element.");
           console.groupEnd();
           return;
         }
@@ -186,7 +223,7 @@
           .trim();
 
         if (!label || !due) {
-          console.log("[CWA] SKIPPED — label or date was empty after cleaning.");
+          console.log("[CWA] SKIPPED — label or date text was empty after cleaning.");
           console.groupEnd();
           return;
         }
@@ -198,23 +235,25 @@
 
       if (deadlines.length > 0) {
         strategyUsed = strategy.name;
-        console.log(`[CWA] Strategy succeeded — ${deadlines.length} deadline(s) collected.`);
+        console.log(`[CWA] Strategy succeeded — ${deadlines.length} pending deadline(s) found.`);
         console.groupEnd();
         break;
       }
 
-      console.log("[CWA] 0 accepted items from this strategy — trying next.");
+      console.log("[CWA] 0 pending items in this strategy — trying next.");
       console.groupEnd();
     }
 
     if (deadlines.length === 0) {
       console.warn(
-        "[CWA] All strategies returned 0 results.\n" +
-        "ACTION: Open DevTools (F12) on courseweb.sliit.lk, right-click an\n" +
-        "assignment row → Inspect, then copy its real CSS class into STRATEGIES."
+        "[CWA] No pending assignments found (0 results).\n" +
+        "If you see unsubmitted assignments on this page:\n" +
+        "  1. Run cwaDiagnose() in the console to find which selectors match.\n" +
+        "  2. Confirm the 'Add submission' button text is exactly that phrase.\n" +
+        "  3. Add the matching selector at the top of STRATEGIES in content.js."
       );
     } else {
-      console.info(`[CWA] Scrape complete (strategy: '${strategyUsed}'):`, deadlines);
+      console.info(`[CWA] Scrape complete via '${strategyUsed}':`, deadlines);
     }
 
     console.groupEnd();
