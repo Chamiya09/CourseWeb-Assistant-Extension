@@ -74,14 +74,16 @@
   // ─────────────────────────────────────────────────────────
 
   /**
-   * Applies a Bootstrap badge colour based on how soon
-   * the deadline is relative to today.
+   * Returns a badge class AND an optional FA warning icon HTML
+   * based on how soon the deadline is.
    */
-  function getBadgeClass(dueText) {
+  function getUrgencyInfo(dueText) {
     const lower = dueText.toLowerCase();
-    if (lower.includes("today") || lower.includes("overdue")) return "bg-danger";
-    if (lower.includes("tomorrow")) return "bg-warning text-dark";
-    return "bg-secondary";
+    if (lower.includes("today") || lower.includes("overdue"))
+      return { badgeClass: "bg-danger", icon: '<i class="fa fa-exclamation-circle" aria-hidden="true" style="margin-right:3px;"></i>' };
+    if (lower.includes("tomorrow"))
+      return { badgeClass: "bg-warning text-dark", icon: '<i class="fa fa-exclamation-triangle" aria-hidden="true" style="margin-right:3px;"></i>' };
+    return { badgeClass: "bg-secondary", icon: "" };
   }
 
   /** Builds one <li> row for the dropdown list. */
@@ -98,11 +100,12 @@
     nameSpan.style.cssText = "max-width:170px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;";
     nameSpan.textContent = label;
 
-    // Due-date badge
+    // Due-date badge with conditional FA warning icon
+    const { badgeClass, icon } = getUrgencyInfo(due);
     const badge = document.createElement("span");
-    badge.className = `badge ${getBadgeClass(due)} ms-2 flex-shrink-0`;
+    badge.className = `badge ${badgeClass} ms-2 flex-shrink-0 d-flex align-items-center`;
     badge.style.fontSize = "0.72rem";
-    badge.textContent = due;
+    badge.innerHTML = icon + due;
 
     a.appendChild(nameSpan);
     a.appendChild(badge);
@@ -127,7 +130,7 @@
     toggle.setAttribute("data-bs-toggle", "dropdown");   // Bootstrap 5
     toggle.setAttribute("data-toggle", "dropdown");      // Bootstrap 4 fallback
     toggle.setAttribute("aria-expanded", "false");
-    toggle.innerHTML = "&#x1F4CB;&nbsp;My Deadlines";
+    toggle.innerHTML = '<i class="fa fa-calendar-check-o" aria-hidden="true" style="margin-right:5px;"></i>My Deadlines';
 
     // Subtle inline style overrides so we blend with the native navbar
     toggle.style.cssText = [
@@ -157,7 +160,7 @@
     const header = document.createElement("li");
     header.innerHTML = `
       <h6 class="dropdown-header d-flex align-items-center gap-1" style="font-size:.8rem; letter-spacing:.04em;">
-        <span>📅</span><span>UPCOMING DEADLINES</span>
+        <i class="fa fa-calendar" aria-hidden="true" style="margin-right:5px;"></i><span>UPCOMING DEADLINES</span>
       </h6>`;
     menu.appendChild(header);
 
@@ -189,7 +192,7 @@
     refreshLink.className = "dropdown-item text-center text-primary";
     refreshLink.href = "#";
     refreshLink.style.fontSize = ".85rem";
-    refreshLink.textContent = "🔄 Re-scan Deadlines";
+    refreshLink.innerHTML = '<i class="fa fa-refresh" aria-hidden="true" style="margin-right:5px;"></i>Re-scan Deadlines';
 
     // Re-scan: scrape → save → rebuild the menu
     refreshLink.addEventListener("click", (e) => {
