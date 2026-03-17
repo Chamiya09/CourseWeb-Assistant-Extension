@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "CourseWeb Assistant",
+  "version": "1.0",
+  "description": "Tracks SLIIT CourseWeb deadlines directly from the Nav Bar.",
+  "permissions": [
+    "storage"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://courseweb.sliit.lk/*"
+      ],
+      "js": [
+        "content.js"
+      ]
+    }
+  ]
+}
