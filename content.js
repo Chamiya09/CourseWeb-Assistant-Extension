@@ -163,156 +163,115 @@
   // 1.  DATA SCRAPING
   // ─────────────────────────────────────────────────────────
   function scrapeDeadlines() {
-    console.group("[CWA] scrapeDeadlines() — bottom-up 'Add submission' strategy");
+    console.group("[CWA] scrapeDeadlines() — CourseWeb exact-match strategy");
     console.log("[CWA] Page:", location.href);
 
     const deadlines = [];
 
-    // ── Step 1: Find every interactive element on the page ──────────────────
-    // We cast the widest possible net so we never miss a Moodle variant.
-    const allInteractive = document.querySelectorAll(
-      'a, button, input[type="button"], input[type="submit"], [role="button"], .btn'
+    // ───────────────────────────────────────────────────────────────────────
+    // GATE: Only scrape if an "Add submission" button exists on this page.
+    // This confirms the assignment is pending (not yet submitted).
+    // Real DOM: <button class="btn btn-primary">Add submission</button>
+    // ───────────────────────────────────────────────────────────────────────
+    const allButtons = document.querySelectorAll("button, a, .btn");
+    const addBtn = Array.from(allButtons).find(
+      (el) => el.textContent.trim().toLowerCase() === "add submission"
     );
-    console.log(`[CWA] Total interactive elements on page: ${allInteractive.length}`);
 
-    // ── Step 2: Keep only the ones whose text is exactly "Add submission" ────
-    const addSubmissionButtons = Array.from(allInteractive).filter((el) => {
-      return el.textContent.trim().toLowerCase() === "add submission";
-    });
-    console.log(`[CWA] 'Add submission' buttons found: ${addSubmissionButtons.length}`);
+    console.log("[CWA] 'Add submission' button:", addBtn ? "FOUND" : "NOT FOUND");
 
-    if (addSubmissionButtons.length === 0) {
-      console.warn(
-        "[CWA] No 'Add submission' buttons found on this page.\n" +
-        "Make sure you are on a CourseWeb course page that has pending assignments.\n" +
-        "If you can SEE the button but it still says 0, inspect its text content:\n" +
-        "  document.querySelectorAll('a,button,.btn').forEach(e => console.log(JSON.stringify(e.textContent.trim())))"
-      );
+    if (!addBtn) {
+      // No pending assignment on this page — load previously saved data instead
+      console.log("[CWA] This page has no pending submission. Skipping scrape.");
       console.groupEnd();
       return deadlines;
     }
 
-    // ── Step 3: For each button, walk UP the DOM to find name + due date ────
-    addSubmissionButtons.forEach((btn, idx) => {
-      console.group(`[CWA] Processing button #${idx}`, btn);
+    // ───────────────────────────────────────────────────────────────────────
+    // 1. ASSIGNMENT NAME
+    //    Real DOM:  <h2>Practical sheet 8 answer - Submission link ...</h2>
+    //              inside #region-main
+    //    Fallback:  data-activityname attribute on .activity-information
+    // ───────────────────────────────────────────────────────────────────────
+    let label = null;
 
-      // Safety check: skip if parent somehow contains a submitted phrase
-      const pageText = btn.closest("body") ? "" : "";  // placeholder — real check below
-      const nearbyText = (btn.closest("li, tr, div, section") || document.body).textContent.toLowerCase();
-      if (isAlreadySubmitted({ textContent: nearbyText })) {
-        console.log("[CWA] SKIPPED — nearby text contains a submitted/graded phrase.");
-        console.groupEnd();
-        return;
-      }
-
-      // Walk up through ancestors to find the assignment container block.
-      // We try progressively wider ancestors until we find name + date text.
-      let label = null;
-      let due = null;
-      let ancestor = btn.parentElement;
-
-      for (let depth = 0; depth < 12 && ancestor; depth++) {
-        // ── Try to extract name ─────────────────────────────────────────────
-        if (!label) {
-          // Common Moodle name selectors searched within this ancestor
-          const nameSelectors = [
-            ".instancename", ".activityname", ".modname",
-            "[data-region='activity-name']", "h2", "h3", "h4",
-            ".name", ".activity-title", ".mod-indent-outer .aalink",
-            ".assign h2", ".page-header-headings h1",
-          ];
-          for (const sel of nameSelectors) {
-            const el = ancestor.querySelector(sel);
-            if (el) {
-              const txt = el.textContent.trim().replace(/\s+/g, " ");
-              if (txt && txt.toLowerCase() !== "add submission") {
-                label = txt;
-                console.log(`[CWA] Name found via '${sel}' at depth ${depth}: "${label}"`);
-                break;
-              }
-            }
-          }
-        }
-
-        // ── Try to extract due date ─────────────────────────────────────────
-        if (!due) {
-          const dateSelectors = [
-            ".text-info", ".duedate", "time",
-            "[data-region='activity-dates'] .text-info",
-            ".activity-altcontent", ".activity-dates",
-            "[data-type='duedate']", ".col-sm-3.font-weight-bold + .col-sm-9",
-            "dd",   // <dt>Due date</dt><dd>...</dd>
-          ];
-          for (const sel of dateSelectors) {
-            const allEls = ancestor.querySelectorAll(sel);
-            for (const el of allEls) {
-              const txt = el.textContent
-                .trim()
-                .replace(/^Due(?:\s*date)?:\s*/i, "")
-                .trim();
-              // Must look like a date / time string — at least 4 chars
-              if (txt.length >= 4 && !/^add submission$/i.test(txt)) {
-                due = txt;
-                console.log(`[CWA] Date found via '${sel}' at depth ${depth}: "${due}"`);
-                break;
-              }
-            }
-            if (due) break;
-          }
-        }
-
-        // ── If both found, stop climbing ────────────────────────────────────
-        if (label && due) break;
-
-        ancestor = ancestor.parentElement;
-      }
-
-      // ── Also try the assignment's own page title as a last-resort name ───
-      if (!label) {
-        const pageTitle = document.querySelector(".page-header-headings h1, #page-header h1, h1");
-        if (pageTitle) {
-          label = pageTitle.textContent.trim().replace(/\s+/g, " ");
-          console.log(`[CWA] Name fallback via page <h1>: "${label}"`);
-        }
-      }
-
-      // ── Log and collect ──────────────────────────────────────────────────
-      console.log(`[CWA] Resolved → label: ${label ? `"${label}"` : "NOT FOUND"}`);
-      console.log(`[CWA] Resolved → due  : ${due ? `"${due}"` : "NOT FOUND"}`);
-
-      if (label && due) {
-        // Deduplicate (same assignment may have multiple Add submission buttons)
-        const alreadyAdded = deadlines.some((d) => d.label === label);
-        if (!alreadyAdded) {
-          deadlines.push({ label, due });
-          console.log(`[CWA] ACCEPTED:`, { label, due });
-        } else {
-          console.log(`[CWA] DUPLICATE — already collected "${label}", skipping.`);
-        }
-      } else {
-        console.warn(
-          "[CWA] Could not resolve both name and date for this button.\n" +
-          "Inspect the element above and note which ancestor holds the name/date,\n" +
-          "then add its selector to the nameSelectors or dateSelectors arrays."
-        );
-      }
-
-      console.groupEnd();
-    });
-
-    // ── Summary ──────────────────────────────────────────────────────────────
-    if (deadlines.length === 0) {
-      console.warn(
-        "[CWA] Buttons were found but no name/date could be extracted.\n" +
-        "Run this in the console to inspect a button's ancestors:\n" +
-        "  let b = document.querySelectorAll('a,button,.btn');\n" +
-        "  let add = [...b].find(e => e.textContent.trim() === 'Add submission');\n" +
-        "  let p = add; for(let i=0;i<10;i++){p=p.parentElement; console.log(i,p.className,p.textContent.slice(0,80));}"
-      );
-    } else {
-      console.info(`[CWA] Scrape complete — ${deadlines.length} pending assignment(s):`, deadlines);
+    // Primary: the <h2> directly inside #region-main (before the activity-header)
+    const h2El = document.querySelector("#region-main > span + h2, #region-main h2");
+    if (h2El) {
+      label = h2El.textContent.trim().replace(/\s+/g, " ");
+      console.log(`[CWA] Name via #region-main h2: "${label}"`);
     }
 
+    // Fallback 1: data-activityname attribute
+    if (!label) {
+      const infoEl = document.querySelector("[data-activityname]");
+      if (infoEl) {
+        label = infoEl.getAttribute("data-activityname").trim();
+        console.log(`[CWA] Name via data-activityname: "${label}"`);
+      }
+    }
+
+    // Fallback 2: page heading
+    if (!label) {
+      const pageH = document.querySelector(".page-header-headings h1, h1");
+      if (pageH) {
+        label = pageH.textContent.trim().replace(/\s+/g, " ");
+        console.log(`[CWA] Name via page <h1>: "${label}"`);
+      }
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 2. DUE DATE
+    //    Real DOM:  Inside [data-region="activity-dates"], there are <div>s:
+    //      <div><strong>Opened:</strong> Monday, 16 March 2026, 12:00 AM</div>
+    //      <div><strong>Due:</strong> Sunday, 22 March 2026, 11:30 PM</div>
+    //    We specifically want the one starting with "Due:".
+    // ───────────────────────────────────────────────────────────────────────
+    let due = null;
+
+    const activityDates = document.querySelector('[data-region="activity-dates"]');
+    if (activityDates) {
+      // Scan each child <div> inside the activity-dates container
+      const dateDivs = activityDates.querySelectorAll("div");
+      dateDivs.forEach((div) => {
+        const rawText = div.textContent.trim();
+        // Match the "Due:" prefix and extract the date after it
+        const match = rawText.match(/^Due:\s*(.+)$/i);
+        if (match) {
+          due = match[1].trim();
+          console.log(`[CWA] Due date via [data-region="activity-dates"]: "${due}"`);
+        }
+      });
+    }
+
+    // Fallback: "Time remaining" row in the submission status table
+    if (!due) {
+      const timeRemainingCell = document.querySelector(".timeremaining");
+      if (timeRemainingCell) {
+        due = timeRemainingCell.textContent.trim();
+        console.log(`[CWA] Due date via .timeremaining fallback: "${due}"`);
+      }
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 3. COLLECT
+    // ───────────────────────────────────────────────────────────────────────
+    console.log(`[CWA] Resolved → label: ${label ? `"${label}"` : "NOT FOUND"}`);
+    console.log(`[CWA] Resolved → due  : ${due ? `"${due}"` : "NOT FOUND"}`);
+
+    if (label && due) {
+      deadlines.push({ label, due });
+      console.log("[CWA] ACCEPTED:", { label, due });
+    } else {
+      console.warn(
+        "[CWA] Could not extract name and/or due date.\n" +
+        "Name source: #region-main h2, [data-activityname], or h1\n" +
+        'Date source: [data-region="activity-dates"] div containing "Due:"'
+      );
+    }
+
+    // ── Final log for easy console verification ──────────────────────────
+    console.log("Scraped Deadlines:", deadlines);
     console.groupEnd();
     return deadlines;
   }
