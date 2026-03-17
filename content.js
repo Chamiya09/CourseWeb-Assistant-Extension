@@ -163,201 +163,218 @@
   // 1.  DATA SCRAPING
   // ─────────────────────────────────────────────────────────
   function scrapeDeadlines() {
-    console.group("[CWA] scrapeDeadlines() — multi-item CourseWeb scraper");
+    console.group("[CWA] scrapeDeadlines() — CourseWeb exact-structure scraper");
     console.log("[CWA] Page:", location.href);
 
     const deadlines = [];
+    const now = new Date();
+    console.log("[CWA] Current time:", now.toISOString());
 
     // ───────────────────────────────────────────────────────────────────────
-    // HELPER: Extract module/course name from the breadcrumb or page header
-    // e.g. "IT2030 - Software Engineering" from the breadcrumb trail.
-    // ───────────────────────────────────────────────────────────────────────
-    function getCourseName() {
-      // Moodle breadcrumb: <nav> <ol class="breadcrumb"> <li>...<a>Course Name</a></li>
-      const crumbs = document.querySelectorAll(".breadcrumb li a, .breadcrumb-item a, #page-navbar a");
-      // The course name is usually the 2nd-to-last or 3rd crumb
-      // Walk backwards and take the first one that looks like a course name
-      for (let i = crumbs.length - 1; i >= 0; i--) {
-        const text = crumbs[i].textContent.trim();
-        // Skip generic crumbs like "Home", "Dashboard", "My courses", "Participants"
-        const skip = /^(home|dashboard|my courses|site home|participants|grades)$/i;
-        if (!skip.test(text) && text.length > 3) {
-          return text;
-        }
-      }
-      return null;
-    }
-
-    // ───────────────────────────────────────────────────────────────────────
-    // HELPER: Parse a Moodle date string to a JS Date object
-    //   e.g. "Sunday, 22 March 2026, 11:30 PM" → Date
+    // HELPER: Parse Moodle date → JS Date
+    //   "Sunday, 22 March 2026, 11:30 PM" → Date object
     // ───────────────────────────────────────────────────────────────────────
     function parseMoodleDate(str) {
       if (!str) return null;
-      // Remove leading day-name + comma: "Sunday, " → ""
+      // Strip leading day-name: "Sunday, 22 March..." → "22 March..."
       const cleaned = str.replace(/^[a-z]+,\s*/i, "").trim();
       const d = new Date(cleaned);
       return isNaN(d.getTime()) ? null : d;
     }
 
     // ───────────────────────────────────────────────────────────────────────
-    // HELPER: Extract task name + due date from a single activity block
+    // 1. MODULE NAME — from the breadcrumb <ol class="breadcrumb">
+    //    Real DOM:
+    //    <ol class="breadcrumb">
+    //      <li class="breadcrumb-item"><a>Home</a></li>
+    //      <li class="breadcrumb-item"><a>My courses</a></li>
+    //      <li class="breadcrumb-item">
+    //        <a href="..." title="IT2130 - Operating Systems...">
+    //          IT2130 - ...
+    //        </a>
+    //      </li>
+    //      <li class="breadcrumb-item"><span>Practical sheet 7...</span></li>
+    //    </ol>
+    //    Strategy: Walk the breadcrumb <a> tags backwards, skip generic
+    //    names like Home/Dashboard, take the first course-code match.
     // ───────────────────────────────────────────────────────────────────────
-    function extractFromBlock(block) {
-      let taskName = null;
-      let due = null;
+    let moduleName = null;
 
-      // Task name — from the data attribute or headings
-      taskName = block.getAttribute("data-activityname");
-      if (taskName) {
-        taskName = taskName.trim();
-      } else {
-        const heading = block.querySelector("h2, h3, h4, .activityname, .instancename");
-        if (heading) taskName = heading.textContent.trim().replace(/\s+/g, " ");
-      }
-
-      // Due date — from child [data-region="activity-dates"]
-      const datesContainer = block.querySelector('[data-region="activity-dates"]') || block;
-      const dateDivs = datesContainer.querySelectorAll("div");
-      dateDivs.forEach((div) => {
-        const rawText = div.textContent.trim();
-        const match = rawText.match(/^Due:\s*(.+)$/i);
-        if (match) {
-          due = match[1].trim();
-        }
-      });
-
-      return { taskName, due };
-    }
-
-    // ───────────────────────────────────────────────────────────────────────
-    // 1. GET THE COURSE / MODULE NAME (from breadcrumb)
-    // ───────────────────────────────────────────────────────────────────────
-    const courseName = getCourseName();
-    console.log("[CWA] Course name:", courseName || "(not found in breadcrumb)");
-
-    // ───────────────────────────────────────────────────────────────────────
-    // 2. FIND ALL ACTIVITY BLOCKS ON THE PAGE
-    //    Strategy A: Course listing page — multiple [data-activityname] blocks
-    //    Strategy B: Single assignment page — one #region-main block
-    // ───────────────────────────────────────────────────────────────────────
-    const allBlocks = document.querySelectorAll(
-      '[data-region="activity-information"], [data-activityname], .activity-information'
+    const crumbLinks = document.querySelectorAll(
+      ".breadcrumb .breadcrumb-item a, .breadcrumb li a, #page-navbar .breadcrumb a"
     );
-    console.log(`[CWA] Activity blocks found via querySelectorAll: ${allBlocks.length}`);
+    console.log(`[CWA] Breadcrumb <a> tags found: ${crumbLinks.length}`);
 
-    // Also include the single-page scenario (#region-main with h2 + dates)
-    const singlePageBlock = document.querySelector("#region-main");
-    const isSinglePage = allBlocks.length <= 1 && singlePageBlock;
+    // Walk backwards — the course link is typically 2nd or 3rd from the end
+    const skipNames = /^(home|dashboard|my courses|site home|participants|grades|course)$/i;
+    for (let i = crumbLinks.length - 1; i >= 0; i--) {
+      const link = crumbLinks[i];
+      // Prefer the title attribute (it usually has the full course name)
+      const fullTitle = (link.getAttribute("title") || "").trim();
+      const linkText = link.textContent.trim();
+      const candidate = fullTitle || linkText;
 
-    if (allBlocks.length === 0 && !isSinglePage) {
-      console.warn("[CWA] No activity blocks found on this page.");
-      console.log("Scraped Deadlines:", deadlines);
-      console.groupEnd();
-      return deadlines;
+      if (!skipNames.test(linkText) && candidate.length > 3) {
+        // Check if it looks like a course code (e.g. "IT2130", "SE1020")
+        if (/^[A-Z]{2,4}\d{3,4}/i.test(candidate)) {
+          moduleName = candidate;
+          console.log(`[CWA] Module name via breadcrumb (crumb #${i}): "${moduleName}"`);
+          break;
+        }
+      }
     }
 
-    const now = new Date();
-    console.log("[CWA] Current time:", now.toISOString());
+    // Fallback: if no course-code pattern found, take the last non-generic crumb
+    if (!moduleName) {
+      for (let i = crumbLinks.length - 1; i >= 0; i--) {
+        const text = crumbLinks[i].textContent.trim();
+        if (!skipNames.test(text) && text.length > 3) {
+          moduleName = text;
+          console.log(`[CWA] Module name via breadcrumb fallback (crumb #${i}): "${moduleName}"`);
+          break;
+        }
+      }
+    }
+
+    console.log("[CWA] Final module name:", moduleName || "NOT FOUND");
 
     // ───────────────────────────────────────────────────────────────────────
-    // 3. ITERATE THROUGH EACH BLOCK WITH try-catch ROBUSTNESS
+    // 2. TASK NAME — from <h1 class="h2 mb-0">
+    //    Real DOM:
+    //    <h1 class="h2 mb-0">Practical sheet 7answer - Submission link...</h1>
+    //    Fallback: #region-main h2, [data-activityname], or any h1
     // ───────────────────────────────────────────────────────────────────────
-    const blocksToScan = allBlocks.length > 0
-      ? allBlocks
-      : [singlePageBlock]; // fallback to single-page
+    let taskName = null;
 
-    blocksToScan.forEach((block, idx) => {
-      try {
-        console.group(`[CWA] Block #${idx}`);
+    // Primary: the exact class from the user's HTML
+    const h1El = document.querySelector("h1.h2.mb-0");
+    if (h1El) {
+      taskName = h1El.textContent.trim().replace(/\s+/g, " ");
+      console.log(`[CWA] Task name via h1.h2.mb-0: "${taskName}"`);
+    }
 
-        // ── Extract task name + due date ──────────────────────────────────
-        let { taskName, due } = extractFromBlock(block);
+    // Fallback 1: the <h2> inside #region-main
+    if (!taskName) {
+      const h2El = document.querySelector("#region-main > span + h2, #region-main h2");
+      if (h2El) {
+        taskName = h2El.textContent.trim().replace(/\s+/g, " ");
+        console.log(`[CWA] Task name via #region-main h2: "${taskName}"`);
+      }
+    }
 
-        // Single-page fallback: if extractFromBlock found nothing, try #region-main h2
-        if (!taskName && isSinglePage) {
-          const h2 = document.querySelector("#region-main > span + h2, #region-main h2");
-          if (h2) taskName = h2.textContent.trim().replace(/\s+/g, " ");
+    // Fallback 2: data-activityname attribute
+    if (!taskName) {
+      const infoEl = document.querySelector("[data-activityname]");
+      if (infoEl) {
+        taskName = infoEl.getAttribute("data-activityname").trim();
+        console.log(`[CWA] Task name via data-activityname: "${taskName}"`);
+      }
+    }
+
+    console.log("[CWA] Final task name:", taskName || "NOT FOUND");
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 3. DUE DATE — from the submission status table
+    //    Real DOM (standard Moodle submission table):
+    //    <table class="generaltable">
+    //      <tr>
+    //        <th>Due date</th>
+    //        <td>Sunday, 22 March 2026, 11:30 PM</td>
+    //      </tr>
+    //    </table>
+    //    Fallback A: [data-region="activity-dates"] div containing "Due:"
+    //    Fallback B: .timeremaining cell
+    // ───────────────────────────────────────────────────────────────────────
+    let dueDate = null;
+
+    // Primary: scan all table rows for a <th> containing "Due date"
+    const tableRows = document.querySelectorAll("table.generaltable tr, .submissionsummarytable tr, .generaltable tr");
+    console.log(`[CWA] Table rows found: ${tableRows.length}`);
+
+    tableRows.forEach((tr) => {
+      const th = tr.querySelector("th");
+      const td = tr.querySelector("td");
+      if (th && td) {
+        const header = th.textContent.trim().toLowerCase();
+        if (header.includes("due date") || header === "due") {
+          dueDate = td.textContent.trim();
+          console.log(`[CWA] Due date via submission table: "${dueDate}"`);
         }
-        if (!due && isSinglePage) {
-          const trCell = document.querySelector(".timeremaining");
-          if (trCell) due = trCell.textContent.trim();
-        }
-
-        console.log("[CWA] Task name:", taskName || "NOT FOUND");
-        console.log("[CWA] Due date :", due || "NOT FOUND");
-
-        if (!taskName || !due) {
-          console.log("[CWA] SKIPPED — missing task name or due date.");
-          console.groupEnd();
-          return;
-        }
-
-        // ── Check for "Add submission" = pending ─────────────────────────
-        // On a single-page view, the button is at page level.
-        // On a listing page, check inside the block or at page level.
-        const searchScope = isSinglePage ? document : block;
-        const allBtns = searchScope.querySelectorAll("button, a, .btn");
-        const hasAddSubmission = Array.from(allBtns).some(
-          (el) => el.textContent.trim().toLowerCase() === "add submission"
-        );
-
-        // Also check for "Edit/Remove submission" = already submitted
-        const blockText = block.textContent.toLowerCase();
-        const isSubmitted =
-          blockText.includes("edit submission") ||
-          blockText.includes("remove submission") ||
-          blockText.includes("submitted for grading");
-
-        if (isSubmitted) {
-          console.log("[CWA] SKIPPED — already submitted.");
-          console.groupEnd();
-          return;
-        }
-        if (!hasAddSubmission && isSinglePage) {
-          // On a single-page view, no Add submission = already submitted
-          console.log("[CWA] SKIPPED — no 'Add submission' button on single-page view.");
-          console.groupEnd();
-          return;
-        }
-
-        // ── Date filter: skip past deadlines ─────────────────────────────
-        const dueDate = parseMoodleDate(due);
-        if (dueDate && dueDate < now) {
-          console.log(`[CWA] SKIPPED — deadline has passed (${dueDate.toLocaleDateString()}).`);
-          console.groupEnd();
-          return;
-        }
-
-        // ── Combine course name + task name ──────────────────────────────
-        let label = taskName;
-        if (courseName && !taskName.toLowerCase().includes(courseName.toLowerCase())) {
-          label = courseName + " — " + taskName;
-        }
-        label = label.replace(/\s+/g, " ").trim();
-
-        // ── Deduplication ────────────────────────────────────────────────
-        const alreadyAdded = deadlines.some((d) => d.label === label);
-        if (alreadyAdded) {
-          console.log(`[CWA] SKIPPED — duplicate: "${label}".`);
-          console.groupEnd();
-          return;
-        }
-
-        // ── ACCEPT ───────────────────────────────────────────────────────
-        deadlines.push({ label, due });
-        console.log("[CWA] ACCEPTED:", { label, due });
-        console.groupEnd();
-
-      } catch (err) {
-        // Robust: if one block throws, continue with the rest
-        console.error(`[CWA] Error processing block #${idx}:`, err);
-        console.groupEnd();
       }
     });
 
+    // Fallback A: [data-region="activity-dates"] div with "Due:"
+    if (!dueDate) {
+      const activityDates = document.querySelector('[data-region="activity-dates"]');
+      if (activityDates) {
+        activityDates.querySelectorAll("div").forEach((div) => {
+          const match = div.textContent.trim().match(/^Due:\s*(.+)$/i);
+          if (match) {
+            dueDate = match[1].trim();
+            console.log(`[CWA] Due date via activity-dates: "${dueDate}"`);
+          }
+        });
+      }
+    }
+
+    // Fallback B: .timeremaining cell
+    if (!dueDate) {
+      const trCell = document.querySelector(".timeremaining");
+      if (trCell) {
+        dueDate = trCell.textContent.trim();
+        console.log(`[CWA] Due date via .timeremaining: "${dueDate}"`);
+      }
+    }
+
+    console.log("[CWA] Final due date:", dueDate || "NOT FOUND");
+
     // ───────────────────────────────────────────────────────────────────────
-    // 4. SUMMARY
+    // 4. GATE: "Add submission" = pending, skip if already submitted
+    // ───────────────────────────────────────────────────────────────────────
+    const allBtns = document.querySelectorAll("button, a, .btn");
+    const hasAddSubmission = Array.from(allBtns).some(
+      (el) => el.textContent.trim().toLowerCase() === "add submission"
+    );
+    console.log("[CWA] 'Add submission' button:", hasAddSubmission ? "FOUND" : "NOT FOUND");
+
+    const pageText = document.body.textContent.toLowerCase();
+    const isSubmitted =
+      pageText.includes("edit submission") ||
+      pageText.includes("remove submission") ||
+      pageText.includes("submitted for grading");
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 5. COLLECT — only if we have all three fields
+    // ───────────────────────────────────────────────────────────────────────
+    try {
+      if (!taskName || !dueDate) {
+        console.warn("[CWA] SKIPPED — missing task name or due date.");
+      } else if (isSubmitted) {
+        console.warn("[CWA] SKIPPED — assignment already submitted.");
+      } else if (!hasAddSubmission) {
+        console.warn("[CWA] SKIPPED — no 'Add submission' button found (not pending).");
+      } else {
+        // ── Date comparison: only keep future deadlines ─────────────────
+        const parsedDate = parseMoodleDate(dueDate);
+        if (parsedDate && parsedDate < now) {
+          console.warn(`[CWA] SKIPPED — deadline has passed (${parsedDate.toLocaleDateString()}).`);
+        } else {
+          // ── Build the data object ────────────────────────────────────
+          const item = {
+            moduleName: moduleName || "Unknown Module",
+            taskName: taskName,
+            dueDate: dueDate,
+          };
+          deadlines.push(item);
+          console.log("[CWA] ACCEPTED:", item);
+        }
+      }
+    } catch (err) {
+      console.error("[CWA] Error during collection:", err);
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // 6. SUMMARY
     // ───────────────────────────────────────────────────────────────────────
     if (deadlines.length === 0) {
       console.warn("[CWA] No upcoming pending deadlines found on this page.");
@@ -465,14 +482,32 @@
    * Data attributes store the ISO target date so the interval
    * can update the DOM without rebuilding elements.
    */
-  function createDeadlineCard(label, due) {
-    const targetDate = parseDeadlineDate(due);
+  function createDeadlineCard(moduleName, taskName, dueDate) {
+    const targetDate = parseDeadlineDate(dueDate);
     const targetISO = targetDate ? targetDate.toISOString() : null;
 
     const li = document.createElement("li");
     li.style.cssText = "padding: 8px 16px; border-bottom: 1px solid #f0f0f0;";
 
     // ── Module name row ──────────────────────────────────
+    const moduleRow = document.createElement("div");
+    moduleRow.className = "d-flex align-items-center";
+    moduleRow.style.marginBottom = "2px";
+
+    const modIcon = document.createElement("i");
+    modIcon.className = "fa fa-graduation-cap";
+    modIcon.setAttribute("aria-hidden", "true");
+    modIcon.style.cssText = "color:#6c757d; margin-right:7px; font-size:.8rem;";
+
+    const modSpan = document.createElement("span");
+    modSpan.style.cssText = "font-size:.78rem; color:#6c757d; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:300px;";
+    modSpan.title = moduleName;
+    modSpan.textContent = moduleName;
+
+    moduleRow.appendChild(modIcon);
+    moduleRow.appendChild(modSpan);
+
+    // ── Task name row ────────────────────────────────────
     const nameRow = document.createElement("div");
     nameRow.className = "d-flex align-items-center";
     nameRow.style.marginBottom = "4px";
@@ -483,12 +518,14 @@
     icon.style.cssText = "color:#6c757d; margin-right:7px; font-size:.85rem;";
 
     const nameSpan = document.createElement("span");
-    nameSpan.style.cssText = "font-weight:600; font-size:.88rem; color:#212529; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:230px;";
-    nameSpan.title = label;
-    nameSpan.textContent = label;
+    nameSpan.style.cssText = "font-weight:600; font-size:.88rem; color:#212529; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:300px;";
+    nameSpan.title = taskName;
+    nameSpan.textContent = taskName;
 
     nameRow.appendChild(icon);
     nameRow.appendChild(nameSpan);
+
+    li.appendChild(moduleRow);
 
     // ── Countdown row ────────────────────────────────────
     const countdownRow = document.createElement("div");
@@ -509,7 +546,7 @@
       const msLeft = targetDate - Date.now();
       countdownSpan.textContent = formatCountdown(msLeft);
     } else {
-      countdownSpan.textContent = "Due: " + due;
+      countdownSpan.textContent = "Due: " + dueDate;
     }
 
     countdownRow.appendChild(clockIcon);
@@ -629,8 +666,12 @@
         </div>`;
       menu.appendChild(empty);
     } else {
-      deadlines.forEach(({ label, due }) => {
-        menu.appendChild(createDeadlineCard(label, due));
+      deadlines.forEach((item) => {
+        // Support both old {label, due} and new {moduleName, taskName, dueDate} formats
+        const mod = item.moduleName || "Unknown Module";
+        const task = item.taskName || item.label || "Unknown Task";
+        const due = item.dueDate || item.due || "Unknown";
+        menu.appendChild(createDeadlineCard(mod, task, due));
       });
     }
 
