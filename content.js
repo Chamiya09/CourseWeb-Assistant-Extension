@@ -10,13 +10,49 @@
   // CONSTANTS
   // ─────────────────────────────────────────────────────────
 
-  // PLACEHOLDER selectors — update after inspecting the real DOM
-  const SELECTORS = {
-    activityItem: ".activity-item, .assignment-card",
-    moduleName: ".instancename, .activity-name",
-    dueDate: ".deadline-date, .due-date",
-    navBar: ".navbar-nav",
-  };
+  // Navbar selector (used by renderDropdown)
+  const NAVBAR_SELECTOR = ".navbar-nav";
+
+  // Each strategy is tried in order — first one that returns results wins.
+  const STRATEGIES = [
+    {
+      name: "modtype_assign rows",
+      container: "li.modtype_assign",
+      label: ".instancename",
+      date: ".text-info, .duedate, [data-region='activity-dates'] .text-info",
+    },
+    {
+      name: "calendar-event blocks",
+      container: ".event",
+      label: ".referer a, .eventname a, h3.name",
+      date: ".date, .col.text-truncate, time",
+    },
+    {
+      name: "assign-overview table rows",
+      container: "table.generaltable tr",
+      label: "td:first-child",
+      date: "td:nth-child(2), td:nth-child(3)",
+    },
+    {
+      name: "card activities (fallback)",
+      container: ".activity-item, .assignment-card",
+      label: ".activityname, .instancename, .activity-name",
+      date: ".deadline-date, .due-date, .duedate",
+    },
+  ];
+
+  // Text phrases that mean the item is already submitted — these get skipped.
+  const SUBMITTED_PHRASES = [
+    "submitted for grading",
+    "submission received",
+    "graded",
+    "not open",
+  ];
+
+  function isSubmitted(element) {
+    const text = element.textContent.toLowerCase();
+    return SUBMITTED_PHRASES.some((phrase) => text.includes(phrase));
+  }
 
   // How long each deadline "window" is (used to calculate progress %).
   // Default: 7 days. Adjust as needed.
@@ -29,19 +65,83 @@
   // 1.  DATA SCRAPING
   // ─────────────────────────────────────────────────────────
   function scrapeDeadlines() {
-    const items = document.querySelectorAll(SELECTORS.activityItem);
+    console.group("[CWA] scrapeDeadlines() — multi-strategy scan");
+    console.log("[CWA] Page:", location.href);
+
     const deadlines = [];
+    let strategyUsed = null;
 
-    items.forEach((item) => {
-      const nameEl = item.querySelector(SELECTORS.moduleName);
-      const dateEl = item.querySelector(SELECTORS.dueDate);
-      if (nameEl && dateEl) {
-        const label = nameEl.textContent.trim();
-        const due = dateEl.textContent.trim();
-        if (label && due) deadlines.push({ label, due });
+    for (const strategy of STRATEGIES) {
+      console.group(`[CWA] Trying strategy: "${strategy.name}"`);
+
+      const containers = document.querySelectorAll(strategy.container);
+      console.log(`[CWA] '${strategy.container}' → ${containers.length} element(s) found.`);
+
+      if (containers.length === 0) {
+        console.log("[CWA] No elements matched — moving to next strategy.");
+        console.groupEnd();
+        continue;
       }
-    });
 
+      containers.forEach((item, idx) => {
+        console.group(`[CWA] Item #${idx}`, item);
+
+        if (isSubmitted(item)) {
+          console.log("[CWA] SKIPPED — element contains a submitted/graded phrase.");
+          console.groupEnd();
+          return;
+        }
+
+        const nameEl = item.querySelector(strategy.label);
+        const dateEl = item.querySelector(strategy.date);
+
+        console.log("[CWA] Label el :", nameEl ? `"${nameEl.textContent.trim()}"` : `NOT FOUND (selector: '${strategy.label}')`);
+        console.log("[CWA] Date el  :", dateEl ? `"${dateEl.textContent.trim()}"` : `NOT FOUND (selector: '${strategy.date}')`);
+
+        if (!nameEl || !dateEl) {
+          console.log("[CWA] SKIPPED — missing label or date element.");
+          console.groupEnd();
+          return;
+        }
+
+        const label = nameEl.textContent.trim().replace(/\s+/g, " ");
+        const due = dateEl.textContent.trim()
+          .replace(/^Due(?::\s?date:\s?|:\s?)/i, "")
+          .trim();
+
+        if (!label || !due) {
+          console.log("[CWA] SKIPPED — label or date was empty after cleaning.");
+          console.groupEnd();
+          return;
+        }
+
+        console.log(`[CWA] ACCEPTED:`, { label, due });
+        deadlines.push({ label, due });
+        console.groupEnd();
+      });
+
+      if (deadlines.length > 0) {
+        strategyUsed = strategy.name;
+        console.log(`[CWA] Strategy succeeded — ${deadlines.length} deadline(s) collected.`);
+        console.groupEnd();
+        break;
+      }
+
+      console.log("[CWA] 0 accepted items from this strategy — trying next.");
+      console.groupEnd();
+    }
+
+    if (deadlines.length === 0) {
+      console.warn(
+        "[CWA] All strategies returned 0 results.\n" +
+        "ACTION: Open DevTools (F12) on courseweb.sliit.lk, right-click an\n" +
+        "assignment row → Inspect, then copy its real CSS class into STRATEGIES."
+      );
+    } else {
+      console.info(`[CWA] Scrape complete (strategy: '${strategyUsed}'):`, deadlines);
+    }
+
+    console.groupEnd();
     return deadlines;
   }
 
@@ -344,9 +444,9 @@
     if (existing) {
       existing.replaceWith(newMenu);
     } else {
-      const navBar = document.querySelector(SELECTORS.navBar);
+      const navBar = document.querySelector(NAVBAR_SELECTOR);
       if (!navBar) {
-        console.warn("[CWA] Navbar not found. Update SELECTORS.navBar.");
+        console.warn("[CWA] Navbar not found. Update NAVBAR_SELECTOR.");
         return;
       }
       navBar.appendChild(newMenu);
