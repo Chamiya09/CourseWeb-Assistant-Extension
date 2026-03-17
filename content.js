@@ -163,97 +163,154 @@
   // 1.  DATA SCRAPING
   // ─────────────────────────────────────────────────────────
   function scrapeDeadlines() {
-    console.group("[CWA] scrapeDeadlines() — 'Add submission' filter mode");
+    console.group("[CWA] scrapeDeadlines() — bottom-up 'Add submission' strategy");
     console.log("[CWA] Page:", location.href);
 
     const deadlines = [];
-    let strategyUsed = null;
 
-    for (const strategy of STRATEGIES) {
-      console.group(`[CWA] Trying strategy: "${strategy.name}"`);
+    // ── Step 1: Find every interactive element on the page ──────────────────
+    // We cast the widest possible net so we never miss a Moodle variant.
+    const allInteractive = document.querySelectorAll(
+      'a, button, input[type="button"], input[type="submit"], [role="button"], .btn'
+    );
+    console.log(`[CWA] Total interactive elements on page: ${allInteractive.length}`);
 
-      const containers = document.querySelectorAll(strategy.container);
-      console.log(`[CWA] '${strategy.container}' → ${containers.length} element(s) found.`);
+    // ── Step 2: Keep only the ones whose text is exactly "Add submission" ────
+    const addSubmissionButtons = Array.from(allInteractive).filter((el) => {
+      return el.textContent.trim().toLowerCase() === "add submission";
+    });
+    console.log(`[CWA] 'Add submission' buttons found: ${addSubmissionButtons.length}`);
 
-      if (containers.length === 0) {
-        console.log("[CWA] No elements matched — moving to next strategy.");
-        console.groupEnd();
-        continue;
-      }
-
-      containers.forEach((item, idx) => {
-        console.group(`[CWA] Item #${idx}`, item);
-
-        // ── Gate 1: skip if already submitted ─────────────
-        if (isAlreadySubmitted(item)) {
-          console.log(
-            "[CWA] SKIPPED — found 'Edit submission', 'Remove submission', " +
-            "or 'Submitted for grading' text inside this element."
-          );
-          console.groupEnd();
-          return;
-        }
-
-        // ── Gate 2: only proceed if 'Add submission' button exists ──
-        const isPending = hasPendingSubmissionButton(item);
-        console.log(
-          `[CWA] 'Add submission' button: ${isPending ? "FOUND — assignment is pending" : "NOT FOUND — skipping"}`
-        );
-        if (!isPending) {
-          console.groupEnd();
-          return;
-        }
-
-        // ── Extract label and due date ─────────────────────
-        const nameEl = item.querySelector(strategy.label);
-        const dateEl = item.querySelector(strategy.date);
-
-        console.log("[CWA] Label el :", nameEl ? `"${nameEl.textContent.trim()}"` : `NOT FOUND (selector: '${strategy.label}')`);
-        console.log("[CWA] Date el  :", dateEl ? `"${dateEl.textContent.trim()}"` : `NOT FOUND (selector: '${strategy.date}')`);
-
-        if (!nameEl || !dateEl) {
-          console.log("[CWA] SKIPPED — could not find label or date element.");
-          console.groupEnd();
-          return;
-        }
-
-        const label = nameEl.textContent.trim().replace(/\s+/g, " ");
-        const due = dateEl.textContent.trim()
-          .replace(/^Due(?::\s?date:\s?|:\s?)/i, "")
-          .trim();
-
-        if (!label || !due) {
-          console.log("[CWA] SKIPPED — label or date text was empty after cleaning.");
-          console.groupEnd();
-          return;
-        }
-
-        console.log(`[CWA] ACCEPTED:`, { label, due });
-        deadlines.push({ label, due });
-        console.groupEnd();
-      });
-
-      if (deadlines.length > 0) {
-        strategyUsed = strategy.name;
-        console.log(`[CWA] Strategy succeeded — ${deadlines.length} pending deadline(s) found.`);
-        console.groupEnd();
-        break;
-      }
-
-      console.log("[CWA] 0 pending items in this strategy — trying next.");
+    if (addSubmissionButtons.length === 0) {
+      console.warn(
+        "[CWA] No 'Add submission' buttons found on this page.\n" +
+        "Make sure you are on a CourseWeb course page that has pending assignments.\n" +
+        "If you can SEE the button but it still says 0, inspect its text content:\n" +
+        "  document.querySelectorAll('a,button,.btn').forEach(e => console.log(JSON.stringify(e.textContent.trim())))"
+      );
       console.groupEnd();
+      return deadlines;
     }
 
+    // ── Step 3: For each button, walk UP the DOM to find name + due date ────
+    addSubmissionButtons.forEach((btn, idx) => {
+      console.group(`[CWA] Processing button #${idx}`, btn);
+
+      // Safety check: skip if parent somehow contains a submitted phrase
+      const pageText = btn.closest("body") ? "" : "";  // placeholder — real check below
+      const nearbyText = (btn.closest("li, tr, div, section") || document.body).textContent.toLowerCase();
+      if (isAlreadySubmitted({ textContent: nearbyText })) {
+        console.log("[CWA] SKIPPED — nearby text contains a submitted/graded phrase.");
+        console.groupEnd();
+        return;
+      }
+
+      // Walk up through ancestors to find the assignment container block.
+      // We try progressively wider ancestors until we find name + date text.
+      let label = null;
+      let due = null;
+      let ancestor = btn.parentElement;
+
+      for (let depth = 0; depth < 12 && ancestor; depth++) {
+        // ── Try to extract name ─────────────────────────────────────────────
+        if (!label) {
+          // Common Moodle name selectors searched within this ancestor
+          const nameSelectors = [
+            ".instancename", ".activityname", ".modname",
+            "[data-region='activity-name']", "h2", "h3", "h4",
+            ".name", ".activity-title", ".mod-indent-outer .aalink",
+            ".assign h2", ".page-header-headings h1",
+          ];
+          for (const sel of nameSelectors) {
+            const el = ancestor.querySelector(sel);
+            if (el) {
+              const txt = el.textContent.trim().replace(/\s+/g, " ");
+              if (txt && txt.toLowerCase() !== "add submission") {
+                label = txt;
+                console.log(`[CWA] Name found via '${sel}' at depth ${depth}: "${label}"`);
+                break;
+              }
+            }
+          }
+        }
+
+        // ── Try to extract due date ─────────────────────────────────────────
+        if (!due) {
+          const dateSelectors = [
+            ".text-info", ".duedate", "time",
+            "[data-region='activity-dates'] .text-info",
+            ".activity-altcontent", ".activity-dates",
+            "[data-type='duedate']", ".col-sm-3.font-weight-bold + .col-sm-9",
+            "dd",   // <dt>Due date</dt><dd>...</dd>
+          ];
+          for (const sel of dateSelectors) {
+            const allEls = ancestor.querySelectorAll(sel);
+            for (const el of allEls) {
+              const txt = el.textContent
+                .trim()
+                .replace(/^Due(?:\s*date)?:\s*/i, "")
+                .trim();
+              // Must look like a date / time string — at least 4 chars
+              if (txt.length >= 4 && !/^add submission$/i.test(txt)) {
+                due = txt;
+                console.log(`[CWA] Date found via '${sel}' at depth ${depth}: "${due}"`);
+                break;
+              }
+            }
+            if (due) break;
+          }
+        }
+
+        // ── If both found, stop climbing ────────────────────────────────────
+        if (label && due) break;
+
+        ancestor = ancestor.parentElement;
+      }
+
+      // ── Also try the assignment's own page title as a last-resort name ───
+      if (!label) {
+        const pageTitle = document.querySelector(".page-header-headings h1, #page-header h1, h1");
+        if (pageTitle) {
+          label = pageTitle.textContent.trim().replace(/\s+/g, " ");
+          console.log(`[CWA] Name fallback via page <h1>: "${label}"`);
+        }
+      }
+
+      // ── Log and collect ──────────────────────────────────────────────────
+      console.log(`[CWA] Resolved → label: ${label ? `"${label}"` : "NOT FOUND"}`);
+      console.log(`[CWA] Resolved → due  : ${due ? `"${due}"` : "NOT FOUND"}`);
+
+      if (label && due) {
+        // Deduplicate (same assignment may have multiple Add submission buttons)
+        const alreadyAdded = deadlines.some((d) => d.label === label);
+        if (!alreadyAdded) {
+          deadlines.push({ label, due });
+          console.log(`[CWA] ACCEPTED:`, { label, due });
+        } else {
+          console.log(`[CWA] DUPLICATE — already collected "${label}", skipping.`);
+        }
+      } else {
+        console.warn(
+          "[CWA] Could not resolve both name and date for this button.\n" +
+          "Inspect the element above and note which ancestor holds the name/date,\n" +
+          "then add its selector to the nameSelectors or dateSelectors arrays."
+        );
+      }
+
+      console.groupEnd();
+    });
+
+    // ── Summary ──────────────────────────────────────────────────────────────
     if (deadlines.length === 0) {
       console.warn(
-        "[CWA] No pending assignments found (0 results).\n" +
-        "If you see unsubmitted assignments on this page:\n" +
-        "  1. Run cwaDiagnose() in the console to find which selectors match.\n" +
-        "  2. Confirm the 'Add submission' button text is exactly that phrase.\n" +
-        "  3. Add the matching selector at the top of STRATEGIES in content.js."
+        "[CWA] Buttons were found but no name/date could be extracted.\n" +
+        "Run this in the console to inspect a button's ancestors:\n" +
+        "  let b = document.querySelectorAll('a,button,.btn');\n" +
+        "  let add = [...b].find(e => e.textContent.trim() === 'Add submission');\n" +
+        "  let p = add; for(let i=0;i<10;i++){p=p.parentElement; console.log(i,p.className,p.textContent.slice(0,80));}"
       );
     } else {
-      console.info(`[CWA] Scrape complete via '${strategyUsed}':`, deadlines);
+      console.info(`[CWA] Scrape complete — ${deadlines.length} pending assignment(s):`, deadlines);
     }
 
     console.groupEnd();
@@ -274,6 +331,7 @@
       callback(result.cwa_deadlines || []);
     });
   }
+
 
   // ─────────────────────────────────────────────────────────
   // 3.  COUNTDOWN + PROGRESS HELPERS
