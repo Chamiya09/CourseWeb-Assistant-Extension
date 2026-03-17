@@ -20,6 +20,7 @@
     "Prorata",
   ];
   const CENTER_KEYWORDS = ["malabe", "northern", "kandy", "matara", "prorata"];
+  const moduleNameCache = {};
 
   let countdownInterval = null;
   let activeFilter = "todo"; // "todo" | "overdue"
@@ -212,17 +213,71 @@
     return Math.min(100, Math.max(0, Math.round((elapsed / windowMs) * 100)));
   }
 
-  function scrapeDeadlines() {
+  async function scrapeDeadlines() {
     const deadlines = [];
 
     const eventItems = document.querySelectorAll(
       '.event[data-eventtype-course="1"]'
     );
 
-    eventItems.forEach(function (event) {
+    async function resolveModuleAcronym(url) {
+      if (!url) return "GEN";
+      if (moduleNameCache[url]) return moduleNameCache[url];
+
+      try {
+        const response = await fetch(url, { credentials: "include" });
+        if (!response.ok) {
+          moduleNameCache[url] = "GEN";
+          return "GEN";
+        }
+
+        const html = await response.text();
+        const doc = new DOMParser().parseFromString(html, "text/html");
+
+        let moduleString = "";
+        const breadcrumbLinks = doc.querySelectorAll("ol.breadcrumb a[title], .breadcrumb a[title], ol.breadcrumb a, .breadcrumb a");
+
+        for (let i = 0; i < breadcrumbLinks.length; i += 1) {
+          const link = breadcrumbLinks[i];
+          const candidate = (link.getAttribute("title") || link.textContent || "").trim();
+          if (!candidate) continue;
+
+          const hasCourseCode = /[A-Za-z]{2,}\d{3,}/.test(candidate);
+          const hasCourseSeparator = candidate.indexOf(" - ") !== -1;
+          if (hasCourseCode || hasCourseSeparator) {
+            moduleString = candidate;
+            break;
+          }
+        }
+
+        if (!moduleString) {
+          const breadcrumbItems = doc.querySelectorAll("ol.breadcrumb li, .breadcrumb li");
+          for (let i = 0; i < breadcrumbItems.length; i += 1) {
+            const candidate = (breadcrumbItems[i].textContent || "").trim().replace(/\s+/g, " ");
+            if (!candidate) continue;
+
+            const hasCourseCode = /[A-Za-z]{2,}\d{3,}/.test(candidate);
+            const hasCourseSeparator = candidate.indexOf(" - ") !== -1;
+            if (hasCourseCode || hasCourseSeparator) {
+              moduleString = candidate;
+              break;
+            }
+          }
+        }
+
+        const acronym = generateAcronym(moduleString);
+        moduleNameCache[url] = acronym;
+        return acronym;
+      } catch (_error) {
+        moduleNameCache[url] = "GEN";
+        return "GEN";
+      }
+    }
+
+    const processedItems = await Promise.all(Array.from(eventItems).map(async function (event) {
       const isCourseEvent = event.getAttribute("data-eventtype-course") === "1";
       const isSiteEvent = event.getAttribute("data-eventtype-site") === "1";
-      if (!isCourseEvent || isSiteEvent) return;
+      if (!isCourseEvent || isSiteEvent) return null;
 
       const taskLink = event.querySelector("h4 a, [data-region='event-name'] a, .eventname a, a[href*='assign']");
       const taskNameRaw = taskLink
@@ -233,20 +288,6 @@
         .replace(/\s+is\s+due$/i, "")
         .trim()
         .replace(/\s+/g, " ");
-
-      const moduleMetaNode = event.querySelector("small.mb-0, small");
-      const moduleMetaText = moduleMetaNode
-        ? moduleMetaNode.textContent.trim().replace(/\s+/g, " ")
-        : "";
-
-      // Example small-tag text: "Assignment is due · IT2130 - Operating Systems... [2026/JAN]"
-      // Keep the portion after the middle dot as the real module string.
-      let moduleString = "";
-      if (moduleMetaText.indexOf("·") !== -1) {
-        moduleString = moduleMetaText.split("·").slice(1).join("·").trim();
-      }
-
-      const moduleAcronym = generateAcronym(moduleString);
 
       const dateNode = event.querySelector(".date.small, .date, [data-region='event-date'], time[datetime]");
       const dueDate = dateNode ? dateNode.textContent.trim().replace(/\s+/g, " ") : "";
@@ -260,19 +301,24 @@
         }
       }
 
-      if (!taskName || !dueDate) return;
+      if (!taskName || !dueDate) return null;
 
-      const duplicate = deadlines.some(function (item) {
-        return item.taskName === taskName && item.dueDate === dueDate && item.url === url;
-      });
-      if (duplicate) return;
+      const moduleAcronym = await resolveModuleAcronym(url);
 
-      deadlines.push({
+      return {
         taskName: taskName,
         dueDate: dueDate,
         url: url,
         moduleAcronym: moduleAcronym,
+      };
+    }));
+
+    processedItems.forEach(function (item) {
+      if (!item) return;
+      const duplicate = deadlines.some(function (existing) {
+        return existing.taskName === item.taskName && existing.dueDate === item.dueDate && existing.url === item.url;
       });
+      if (!duplicate) deadlines.push(item);
     });
 
     console.info("[CWA] Scraped deadlines:", deadlines.length);
@@ -708,9 +754,9 @@
     rescanLink.style.cssText = "font-size:.84rem; padding:8px 0;";
     rescanLink.innerHTML = '<i class="fa fa-refresh" aria-hidden="true" style="margin-right:5px;"></i>Re-scan Deadlines';
 
-    rescanLink.addEventListener("click", function (e) {
+    rescanLink.addEventListener("click", async function (e) {
       e.preventDefault();
-      const fresh = scrapeDeadlines();
+      const fresh = await scrapeDeadlines();
       saveDeadlines(fresh);
       renderDropdown(fresh);
     });
@@ -793,10 +839,10 @@
   function init() {
     injectModernFilterStyles();
 
-    loadSelectedCampus(function (savedCampus) {
+    loadSelectedCampus(async function (savedCampus) {
       selectedCampus = savedCampus || DEFAULT_CAMPUS;
 
-      const scraped = scrapeDeadlines();
+      const scraped = await scrapeDeadlines();
       saveDeadlines(scraped);
 
       loadDeadlines(function (saved) {
