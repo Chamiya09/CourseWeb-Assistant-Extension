@@ -300,9 +300,9 @@
   }
 
   function detectMentionedCampuses(taskName) {
-    const title = (taskName || "").toLowerCase();
+    const fullTitle = String(taskName || "").toLowerCase().trim();
     return CENTER_KEYWORDS.filter(function (center) {
-      return title.indexOf(center) !== -1;
+      return fullTitle.includes(center);
     });
   }
 
@@ -320,13 +320,23 @@
   function generateAcronym(moduleName) {
     if (!moduleName) return "GEN";
 
-    const stopWords = ["and", "of", "for", "the"];
+    const stopWords = ["and", "of", "the", "for", "in"];
+    const raw = String(moduleName);
 
-    // Remove semester tags inside brackets: [2026/JAN]
-    let cleaned = String(moduleName).replace(/\[[^\]]*\]/g, " ").trim();
+    const hyphenIndex = raw.indexOf("-");
+    const bracketIndex = raw.indexOf("[");
 
-    // Remove leading course code and hyphen: IT2130 -
-    cleaned = cleaned.replace(/^\s*[A-Za-z]{2,}\d+[A-Za-z0-9]*\s*-\s*/i, "");
+    // Extract text between first hyphen and opening bracket.
+    let coreName = raw;
+    if (hyphenIndex !== -1) {
+      const start = hyphenIndex + 1;
+      const end = bracketIndex !== -1 && bracketIndex > start ? bracketIndex : raw.length;
+      coreName = raw.slice(start, end);
+    } else if (bracketIndex !== -1) {
+      coreName = raw.slice(0, bracketIndex);
+    }
+
+    const cleaned = coreName.trim();
 
     const words = cleaned
       .split(/[^A-Za-z0-9]+/)
@@ -346,20 +356,20 @@
 
   function filterByCampus(deadlines, campusLabel) {
     const selectedKey = normalizeSelectedCampus(campusLabel);
-    const selectedCampusLower = (campusLabel || "").toLowerCase();
+    const selectedCampusLower = String(campusLabel || "").toLowerCase().trim();
 
     return deadlines.filter(function (item) {
-      const title = (item.taskName || "").toLowerCase();
+      const fullTitle = String(item.taskName || "").toLowerCase().trim();
       const mentioned = detectMentionedCampuses(item.taskName);
 
       // 1) Show all if user selected All Centers.
       if (campusLabel === DEFAULT_CAMPUS || selectedKey === "all") return true;
 
       // 2) Show if task is explicitly for all centers.
-      if (title.indexOf("all centers") !== -1) return true;
+      if (fullTitle.includes("all centers")) return true;
 
       // 3) Show if title mentions selected campus.
-      if (title.indexOf(selectedCampusLower) !== -1 || title.indexOf(selectedKey) !== -1) return true;
+      if (fullTitle.includes(selectedCampusLower) || fullTitle.includes(selectedKey)) return true;
 
       // 4) Hide if it mentions any other center keyword.
       const hasOtherCenter = CENTER_KEYWORDS
@@ -367,7 +377,7 @@
           return center !== selectedKey;
         })
         .some(function (center) {
-          return title.indexOf(center) !== -1;
+          return fullTitle.includes(center);
         });
 
       if (hasOtherCenter) return false;
