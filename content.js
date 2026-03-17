@@ -1,131 +1,261 @@
 // ============================================================
-// CourseWeb Assistant - content.js
-// Injects a "My Deadlines" dropdown into the CourseWeb navbar.
+// CourseWeb Assistant - content.js  v2.0
+// Scrapes deadlines, saves to chrome.storage, injects UI.
 // ============================================================
 
 (function () {
   "use strict";
 
-  // --- Configuration ---
-  // Dummy deadline data (will be replaced with dynamic data later)
-  const DEADLINES = [
-    { label: "SE Lab 03",          due: "Tomorrow" },
-    { label: "Web Tech Assignment", due: "Mar 20" },
-    { label: "DS Quiz 02",         due: "Mar 22" },
-  ];
+  // ─────────────────────────────────────────────────────────
+  // 1.  DATA SCRAPING
+  //     Selectors below are PLACEHOLDERS — inspect CourseWeb's
+  //     real DOM and replace them with the actual class names.
+  // ─────────────────────────────────────────────────────────
+  const SELECTORS = {
+    activityItem: ".activity-item, .assignment-card",  // wrapper for each task
+    moduleName: ".instancename, .activity-name",     // element holding the title
+    dueDate: ".deadline-date, .due-date",         // element holding the date
+  };
 
-  // --- Helper: Build one <li> deadline item ---
+  /**
+   * scrapeDeadlines()
+   * Walks the page DOM, extracts module names + due dates,
+   * and returns an array of { label, due } objects.
+   */
+  function scrapeDeadlines() {
+    const items = document.querySelectorAll(SELECTORS.activityItem);
+    const deadlines = [];
+
+    items.forEach((item) => {
+      const nameEl = item.querySelector(SELECTORS.moduleName);
+      const dateEl = item.querySelector(SELECTORS.dueDate);
+
+      if (nameEl && dateEl) {
+        const label = nameEl.textContent.trim();
+        const due = dateEl.textContent.trim();
+
+        if (label && due) {
+          deadlines.push({ label, due });
+        }
+      }
+    });
+
+    return deadlines;
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // 2.  CHROME STORAGE  — Save & Load
+  // ─────────────────────────────────────────────────────────
+
+  /**
+   * saveDeadlines(deadlines)
+   * Persists the scraped array to chrome.storage.local.
+   */
+  function saveDeadlines(deadlines) {
+    chrome.storage.local.set({ cwa_deadlines: deadlines }, () => {
+      console.info(`[CourseWeb Assistant] 💾 Saved ${deadlines.length} deadline(s).`);
+    });
+  }
+
+  /**
+   * loadDeadlines(callback)
+   * Reads saved deadlines back from chrome.storage.local,
+   * then calls callback(deadlines).
+   */
+  function loadDeadlines(callback) {
+    chrome.storage.local.get(["cwa_deadlines"], (result) => {
+      const saved = result.cwa_deadlines || [];
+      callback(saved);
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // 3.  UI HELPERS — Build dropdown items
+  // ─────────────────────────────────────────────────────────
+
+  /**
+   * Applies a Bootstrap badge colour based on how soon
+   * the deadline is relative to today.
+   */
+  function getBadgeClass(dueText) {
+    const lower = dueText.toLowerCase();
+    if (lower.includes("today") || lower.includes("overdue")) return "bg-danger";
+    if (lower.includes("tomorrow")) return "bg-warning text-dark";
+    return "bg-secondary";
+  }
+
+  /** Builds one <li> row for the dropdown list. */
   function createDeadlineItem(label, due) {
     const li = document.createElement("li");
 
     const a = document.createElement("a");
-    a.className = "dropdown-item d-flex justify-content-between align-items-center";
+    a.className = "dropdown-item d-flex justify-content-between align-items-center py-2";
     a.href = "#";
 
-    const span = document.createElement("span");
-    span.textContent = label;
+    // Module name
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "cwa-item-label";
+    nameSpan.style.cssText = "max-width:170px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;";
+    nameSpan.textContent = label;
 
+    // Due-date badge
     const badge = document.createElement("span");
-    badge.className = "badge bg-warning text-dark ms-2";
+    badge.className = `badge ${getBadgeClass(due)} ms-2 flex-shrink-0`;
+    badge.style.fontSize = "0.72rem";
     badge.textContent = due;
 
-    a.appendChild(span);
+    a.appendChild(nameSpan);
     a.appendChild(badge);
     li.appendChild(a);
-
     return li;
   }
 
-  // --- Helper: Build the full dropdown <li> ---
-  function buildDropdown() {
-    // Outer <li> wrapper
+  // ─────────────────────────────────────────────────────────
+  // 4.  UI BUILD — Assemble the full dropdown <li>
+  // ─────────────────────────────────────────────────────────
+  function buildDropdown(deadlines) {
+    // ── Outer nav-item wrapper ──────────────────────────────
     const navItem = document.createElement("li");
     navItem.className = "nav-item dropdown";
     navItem.id = "cwa-deadlines-menu";
 
-    // Toggle <a> button
+    // ── Toggle link (matches Moodle/Bootstrap navbar style) ─
     const toggle = document.createElement("a");
     toggle.className = "nav-link dropdown-toggle";
     toggle.href = "#";
     toggle.setAttribute("role", "button");
-    toggle.setAttribute("data-bs-toggle", "dropdown");
+    toggle.setAttribute("data-bs-toggle", "dropdown");   // Bootstrap 5
+    toggle.setAttribute("data-toggle", "dropdown");      // Bootstrap 4 fallback
     toggle.setAttribute("aria-expanded", "false");
-    toggle.innerHTML = "&#x1F4CB; My Deadlines"; // 📋 icon
+    toggle.innerHTML = "&#x1F4CB;&nbsp;My Deadlines";
 
-    // Apply a subtle highlight so it stands out in the navbar
-    toggle.style.cssText = "font-weight: 600; color: #f0ad4e !important;";
+    // Subtle inline style overrides so we blend with the native navbar
+    toggle.style.cssText = [
+      "font-weight: 600",
+      "color: rgba(255,255,255,.9) !important",           // Moodle default nav text
+      "cursor: pointer",
+      "transition: color .15s ease",
+    ].join("; ");
 
-    // Dropdown menu <ul>
-    const dropdownMenu = document.createElement("ul");
-    dropdownMenu.className = "dropdown-menu dropdown-menu-end";
-    dropdownMenu.style.cssText = "min-width: 260px;";
+    toggle.addEventListener("mouseenter", () => {
+      toggle.style.color = "#ffffff !important";
+      toggle.style.textDecoration = "none";
+    });
 
-    // Header item
+    // ── Dropdown menu panel ─────────────────────────────────
+    const menu = document.createElement("ul");
+    menu.className = "dropdown-menu dropdown-menu-end shadow-sm";
+    menu.style.cssText = [
+      "min-width: 290px",
+      "background: #ffffff",
+      "border: 1px solid rgba(0,0,0,.1)",
+      "border-radius: 8px",
+      "padding: 4px 0",
+    ].join("; ");
+
+    // Header
     const header = document.createElement("li");
-    header.innerHTML = `<h6 class="dropdown-header">📅 Upcoming Deadlines</h6>`;
-    dropdownMenu.appendChild(header);
+    header.innerHTML = `
+      <h6 class="dropdown-header d-flex align-items-center gap-1" style="font-size:.8rem; letter-spacing:.04em;">
+        <span>📅</span><span>UPCOMING DEADLINES</span>
+      </h6>`;
+    menu.appendChild(header);
 
-    const divider = document.createElement("li");
-    divider.innerHTML = `<hr class="dropdown-divider">`;
-    dropdownMenu.appendChild(divider);
+    const hr1 = document.createElement("li");
+    hr1.innerHTML = `<hr class="dropdown-divider my-1">`;
+    menu.appendChild(hr1);
 
-    // Deadline items
-    if (DEADLINES.length === 0) {
+    // Deadline rows  (fallback message if none found)
+    if (deadlines.length === 0) {
       const empty = document.createElement("li");
-      empty.innerHTML = `<span class="dropdown-item text-muted">No deadlines saved yet.</span>`;
-      dropdownMenu.appendChild(empty);
+      empty.innerHTML = `
+        <span class="dropdown-item text-muted fst-italic" style="font-size:.88rem;">
+          No deadlines found on this page.
+        </span>`;
+      menu.appendChild(empty);
     } else {
-      DEADLINES.forEach(({ label, due }) => {
-        dropdownMenu.appendChild(createDeadlineItem(label, due));
+      deadlines.forEach(({ label, due }) => {
+        menu.appendChild(createDeadlineItem(label, due));
       });
     }
 
-    // Footer divider + manage link
-    const divider2 = document.createElement("li");
-    divider2.innerHTML = `<hr class="dropdown-divider">`;
-    dropdownMenu.appendChild(divider2);
+    // Footer
+    const hr2 = document.createElement("li");
+    hr2.innerHTML = `<hr class="dropdown-divider my-1">`;
+    menu.appendChild(hr2);
 
-    const footerItem = document.createElement("li");
-    const footerLink = document.createElement("a");
-    footerLink.className = "dropdown-item text-center text-primary";
-    footerLink.href = "#";
-    footerLink.textContent = "⚙ Manage Deadlines";
-    footerItem.appendChild(footerLink);
-    dropdownMenu.appendChild(footerItem);
+    const footer = document.createElement("li");
+    const refreshLink = document.createElement("a");
+    refreshLink.className = "dropdown-item text-center text-primary";
+    refreshLink.href = "#";
+    refreshLink.style.fontSize = ".85rem";
+    refreshLink.textContent = "🔄 Re-scan Deadlines";
+
+    // Re-scan: scrape → save → rebuild the menu
+    refreshLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      const fresh = scrapeDeadlines();
+      saveDeadlines(fresh);
+      renderDropdown(fresh);   // re-render in place
+    });
+
+    footer.appendChild(refreshLink);
+    menu.appendChild(footer);
 
     navItem.appendChild(toggle);
-    navItem.appendChild(dropdownMenu);
+    navItem.appendChild(menu);
 
     return navItem;
   }
 
-  // --- Main: Find the navbar and inject the dropdown ---
-  function injectDeadlinesMenu() {
-    // PLACEHOLDER selector — update this to match CourseWeb's real navbar
-    const navBar = document.querySelector(".navbar-nav");
+  // ─────────────────────────────────────────────────────────
+  // 5.  RENDER — Insert / replace dropdown in the navbar
+  // ─────────────────────────────────────────────────────────
+  function renderDropdown(deadlines) {
+    const existing = document.getElementById("cwa-deadlines-menu");
+    const newMenu = buildDropdown(deadlines);
 
-    if (!navBar) {
-      console.warn("[CourseWeb Assistant] Navbar not found. Check the selector.");
-      return;
+    if (existing) {
+      // Replace in-place so the position in the navbar is preserved
+      existing.replaceWith(newMenu);
+    } else {
+      // PLACEHOLDER selector — update after inspecting CourseWeb's real DOM
+      const navBar = document.querySelector(".navbar-nav");
+      if (!navBar) {
+        console.warn("[CourseWeb Assistant] ⚠️ Navbar not found. Update the selector.");
+        return;
+      }
+      navBar.appendChild(newMenu);
     }
 
-    // Prevent duplicate injection (e.g., on SPA navigation)
-    if (document.getElementById("cwa-deadlines-menu")) {
-      return;
-    }
-
-    const dropdown = buildDropdown();
-    navBar.appendChild(dropdown);
-
-    console.info("[CourseWeb Assistant] ✅ Deadlines menu injected successfully.");
+    console.info("[CourseWeb Assistant] ✅ Dropdown rendered.");
   }
 
-  // --- Entry Point ---
-  // Run after the DOM is fully loaded (document_idle is the default in manifest.json)
+  // ─────────────────────────────────────────────────────────
+  // 6.  ENTRY POINT
+  //     • Scrape the page → save fresh data
+  //     • Load from storage → inject the UI
+  // ─────────────────────────────────────────────────────────
+  function init() {
+    // Scrape immediately and persist
+    const scraped = scrapeDeadlines();
+    if (scraped.length > 0) {
+      saveDeadlines(scraped);
+    }
+
+    // Always load from storage so previously saved deadlines
+    // show up even on pages that have no activity listings.
+    loadDeadlines((saved) => {
+      const toDisplay = saved.length > 0 ? saved : scraped;
+      renderDropdown(toDisplay);
+    });
+  }
+
+  // Wait for full DOM before running
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", injectDeadlinesMenu);
+    document.addEventListener("DOMContentLoaded", init);
   } else {
-    // DOM already ready (readyState = "interactive" or "complete")
-    injectDeadlinesMenu();
+    init();
   }
+
 })();
