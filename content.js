@@ -1,6 +1,6 @@
 // ============================================================
-// CourseWeb Assistant - content.js  v4.0
-// URL-aware deadline menu with To Do / Overdue filters.
+// CourseWeb Assistant - content.js  v5.0
+// URL-aware deadlines with To Do/Overdue + center filtering.
 // ============================================================
 
 (function () {
@@ -19,13 +19,7 @@
     "Matara Center",
     "Prorata",
   ];
-  const CAMPUS_KEYWORDS = {
-    malabe: ["malabe"],
-    northern: ["northern", "northern uni", "northern university"],
-    kandy: ["kandy", "kandy uni", "kandy university"],
-    matara: ["matara", "matara center"],
-    prorata: ["prorata", "pro rata"],
-  };
+  const CENTER_KEYWORDS = ["malabe", "northern", "kandy", "matara", "prorata"];
 
   let countdownInterval = null;
   let activeFilter = "todo"; // "todo" | "overdue"
@@ -228,8 +222,6 @@
     eventItems.forEach(function (event) {
       const isCourseEvent = event.getAttribute("data-eventtype-course") === "1";
       const isSiteEvent = event.getAttribute("data-eventtype-site") === "1";
-
-      // Ignore any non-course events, including site-wide announcements/festivals.
       if (!isCourseEvent || isSiteEvent) return;
 
       const taskLink = event.querySelector("h4 a, [data-region='event-name'] a, .eventname a, a[href*='assign']");
@@ -241,6 +233,9 @@
         .replace(/\s+is\s+due$/i, "")
         .trim()
         .replace(/\s+/g, " ");
+
+      const moduleNode = event.querySelector(".course-name, .coursename, a[href*='/course/view.php'], [data-region='course-name']");
+      const moduleName = moduleNode ? moduleNode.textContent.trim().replace(/\s+/g, " ") : "";
 
       const dateNode = event.querySelector(".date.small, .date, [data-region='event-date'], time[datetime]");
       const dueDate = dateNode ? dateNode.textContent.trim().replace(/\s+/g, " ") : "";
@@ -261,8 +256,8 @@
       });
       if (duplicate) return;
 
-      // Save ALL items (past and future). Filtering happens in the UI layer.
       deadlines.push({
+        moduleName: moduleName,
         taskName: taskName,
         dueDate: dueDate,
         url: url,
@@ -306,59 +301,81 @@
 
   function detectMentionedCampuses(taskName) {
     const title = (taskName || "").toLowerCase();
-    const mentioned = [];
-
-    Object.keys(CAMPUS_KEYWORDS).forEach(function (campusKey) {
-      const aliases = CAMPUS_KEYWORDS[campusKey];
-      const hasAlias = aliases.some(function (alias) {
-        return title.indexOf(alias) !== -1;
-      });
-      if (hasAlias) {
-        mentioned.push(campusKey);
-      }
+    return CENTER_KEYWORDS.filter(function (center) {
+      return title.indexOf(center) !== -1;
     });
-
-    return mentioned;
   }
 
   function normalizeSelectedCampus(campusLabel) {
-    switch (campusLabel) {
-      case "Malabe":
-        return "malabe";
-      case "Northern Uni":
-        return "northern";
-      case "Kandy Uni":
-        return "kandy";
-      case "Matara Center":
-        return "matara";
-      case "Prorata":
-        return "prorata";
-      default:
-        return "all";
-    }
+    if (!campusLabel || campusLabel === DEFAULT_CAMPUS) return "all";
+    const lower = campusLabel.toLowerCase();
+    if (lower.indexOf("malabe") !== -1) return "malabe";
+    if (lower.indexOf("northern") !== -1) return "northern";
+    if (lower.indexOf("kandy") !== -1) return "kandy";
+    if (lower.indexOf("matara") !== -1) return "matara";
+    if (lower.indexOf("prorata") !== -1 || lower.indexOf("pro rata") !== -1) return "prorata";
+    return lower;
+  }
+
+  function generateAcronym(moduleName) {
+    if (!moduleName) return "GEN";
+
+    const stopWords = ["and", "of", "for", "the"];
+
+    // Remove semester tags inside brackets: [2026/JAN]
+    let cleaned = String(moduleName).replace(/\[[^\]]*\]/g, " ").trim();
+
+    // Remove leading course code and hyphen: IT2130 -
+    cleaned = cleaned.replace(/^\s*[A-Za-z]{2,}\d+[A-Za-z0-9]*\s*-\s*/i, "");
+
+    const words = cleaned
+      .split(/[^A-Za-z0-9]+/)
+      .filter(function (word) {
+        return word && stopWords.indexOf(word.toLowerCase()) === -1;
+      });
+
+    if (words.length === 0) return "GEN";
+
+    return words
+      .map(function (word) {
+        return word.charAt(0).toUpperCase();
+      })
+      .join("")
+      .slice(0, 5);
   }
 
   function filterByCampus(deadlines, campusLabel) {
     const selectedKey = normalizeSelectedCampus(campusLabel);
-    if (selectedKey === "all") return deadlines;
+    const selectedCampusLower = (campusLabel || "").toLowerCase();
 
     return deadlines.filter(function (item) {
       const title = (item.taskName || "").toLowerCase();
-
-      // Global tasks should always be visible.
-      if (title.indexOf("all centers") !== -1 || title.indexOf("all centre") !== -1) {
-        return true;
-      }
-
       const mentioned = detectMentionedCampuses(item.taskName);
 
-      // Generic tasks without campus-specific wording should remain visible.
-      if (mentioned.length === 0) {
-        return true;
-      }
+      // 1) Show all if user selected All Centers.
+      if (campusLabel === DEFAULT_CAMPUS || selectedKey === "all") return true;
 
-      // Show if this title mentions the selected campus; otherwise hide it.
-      return mentioned.indexOf(selectedKey) !== -1;
+      // 2) Show if task is explicitly for all centers.
+      if (title.indexOf("all centers") !== -1) return true;
+
+      // 3) Show if title mentions selected campus.
+      if (title.indexOf(selectedCampusLower) !== -1 || title.indexOf(selectedKey) !== -1) return true;
+
+      // 4) Hide if it mentions any other center keyword.
+      const hasOtherCenter = CENTER_KEYWORDS
+        .filter(function (center) {
+          return center !== selectedKey;
+        })
+        .some(function (center) {
+          return title.indexOf(center) !== -1;
+        });
+
+      if (hasOtherCenter) return false;
+
+      // 5) Generic task (no center keywords) should be shown.
+      if (mentioned.length === 0) return true;
+
+      return false;
     });
   }
 
@@ -377,14 +394,20 @@
     icon.setAttribute("aria-hidden", "true");
     icon.style.cssText = "color:#6c757d; margin-right:7px; font-size:.86rem;";
 
+    const badge = document.createElement("span");
+    badge.className = "badge rounded-pill bg-primary me-2";
+    badge.style.cssText = "font-size: 0.75em;";
+    badge.textContent = generateAcronym(item.moduleName || item.taskName);
+
     const link = document.createElement("a");
     link.href = item.url || "#";
     link.className = "text-decoration-none";
-    link.style.cssText = "font-weight:600; font-size:.88rem; color:#0d6efd; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:300px; display:inline-block;";
+    link.style.cssText = "font-weight:600; font-size:.88rem; color:#0d6efd; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:280px; display:inline-block;";
     link.title = item.taskName;
     link.textContent = item.taskName;
 
     nameRow.appendChild(icon);
+    nameRow.appendChild(badge);
     nameRow.appendChild(link);
 
     const dueRow = document.createElement("div");
@@ -469,22 +492,28 @@
     icon.setAttribute("aria-hidden", "true");
     icon.style.cssText = "color:#6c757d; margin-right:7px; font-size:.86rem;";
 
+    const acronymBadge = document.createElement("span");
+    acronymBadge.className = "badge rounded-pill bg-primary me-2";
+    acronymBadge.style.cssText = "font-size: 0.75em;";
+    acronymBadge.textContent = generateAcronym(item.moduleName || item.taskName);
+
     const link = document.createElement("a");
     link.href = item.url || "#";
     link.className = "text-decoration-none";
-    link.style.cssText = "font-weight:600; font-size:.88rem; color:#0d6efd; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:230px; display:inline-block;";
+    link.style.cssText = "font-weight:600; font-size:.88rem; color:#0d6efd; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px; display:inline-block;";
     link.title = item.taskName;
     link.textContent = item.taskName;
 
     titleWrap.appendChild(icon);
+    titleWrap.appendChild(acronymBadge);
     titleWrap.appendChild(link);
 
-    const badge = document.createElement("span");
-    badge.className = "badge bg-danger";
-    badge.innerHTML = '<i class="fa fa-exclamation-circle" aria-hidden="true" style="margin-right:4px;"></i>Missing/Overdue';
+    const overdueBadge = document.createElement("span");
+    overdueBadge.className = "badge bg-danger";
+    overdueBadge.innerHTML = '<i class="fa fa-exclamation-circle" aria-hidden="true" style="margin-right:4px;"></i>Missing/Overdue';
 
     topRow.appendChild(titleWrap);
-    topRow.appendChild(badge);
+    topRow.appendChild(overdueBadge);
 
     const dueRow = document.createElement("div");
     dueRow.className = "d-flex align-items-center";
@@ -513,9 +542,7 @@
       const parsed = parseDeadlineDate(item.dueDate);
       if (!parsed) return false;
 
-      if (filter === "todo") {
-        return parsed >= now;
-      }
+      if (filter === "todo") return parsed >= now;
       return parsed < now;
     });
   }
@@ -552,9 +579,7 @@
   }
 
   function startCountdownTicker() {
-    if (countdownInterval) {
-      clearInterval(countdownInterval);
-    }
+    if (countdownInterval) clearInterval(countdownInterval);
 
     countdownInterval = setInterval(function () {
       const now = Date.now();
@@ -725,12 +750,13 @@
   function normalizeStoredItem(item) {
     if (!item) return null;
 
+    const moduleName = item.moduleName || "";
     const taskName = item.taskName || item.label || "";
     const dueDate = item.dueDate || item.due || "";
     const url = item.url || "";
 
     if (!taskName || !dueDate) return null;
-    return { taskName: taskName, dueDate: dueDate, url: url };
+    return { moduleName: moduleName, taskName: taskName, dueDate: dueDate, url: url };
   }
 
   function init() {
@@ -740,8 +766,6 @@
       selectedCampus = savedCampus || DEFAULT_CAMPUS;
 
       const scraped = scrapeDeadlines();
-
-      // Persist everything (both upcoming and past).
       saveDeadlines(scraped);
 
       loadDeadlines(function (saved) {
