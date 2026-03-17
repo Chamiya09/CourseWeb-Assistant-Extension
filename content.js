@@ -9,9 +9,27 @@
   const NAVBAR_SELECTOR = ".navbar-nav";
   const DEADLINE_WINDOW_DAYS = 7;
   const STORAGE_KEY = "cwa_deadlines";
+  const CAMPUS_STORAGE_KEY = "selectedCampus";
+  const DEFAULT_CAMPUS = "All Centers (Show All)";
+  const CAMPUS_OPTIONS = [
+    "All Centers (Show All)",
+    "Malabe",
+    "Northern Uni",
+    "Kandy Uni",
+    "Matara Center",
+    "Prorata",
+  ];
+  const CAMPUS_KEYWORDS = {
+    malabe: ["malabe"],
+    northern: ["northern", "northern uni", "northern university"],
+    kandy: ["kandy", "kandy uni", "kandy university"],
+    matara: ["matara", "matara center"],
+    prorata: ["prorata", "pro rata"],
+  };
 
   let countdownInterval = null;
   let activeFilter = "todo"; // "todo" | "overdue"
+  let selectedCampus = DEFAULT_CAMPUS;
 
   function injectModernFilterStyles() {
     if (document.getElementById("cwa-modern-filter-styles")) return;
@@ -74,6 +92,23 @@
       "}",
       ".cwa-segment-btn i {",
       "  margin-right: 5px;",
+      "}",
+      ".cwa-campus-select-wrap {",
+      "  margin-top: 8px;",
+      "}",
+      ".cwa-campus-select {",
+      "  border-radius: 12px;",
+      "  font-size: 0.76rem;",
+      "  font-weight: 600;",
+      "  border: 1px solid rgba(15, 23, 42, 0.12);",
+      "  background-color: rgba(255, 255, 255, 0.92);",
+      "  color: #334155;",
+      "  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);",
+      "  transition: border-color 180ms ease, box-shadow 180ms ease;",
+      "}",
+      ".cwa-campus-select:focus {",
+      "  border-color: rgba(13, 110, 253, 0.55);",
+      "  box-shadow: 0 0 0 0.15rem rgba(13, 110, 253, 0.15);",
       "}",
     ].join("\n");
 
@@ -187,10 +222,16 @@
     const deadlines = [];
 
     const eventItems = document.querySelectorAll(
-      '.event[data-region="event-item"], [data-region="event-item"], .event[data-eventtype-course]'
+      '.event[data-eventtype-course="1"]'
     );
 
     eventItems.forEach(function (event) {
+      const isCourseEvent = event.getAttribute("data-eventtype-course") === "1";
+      const isSiteEvent = event.getAttribute("data-eventtype-site") === "1";
+
+      // Ignore any non-course events, including site-wide announcements/festivals.
+      if (!isCourseEvent || isSiteEvent) return;
+
       const taskLink = event.querySelector("h4 a, [data-region='event-name'] a, .eventname a, a[href*='assign']");
       const taskNameRaw = taskLink
         ? (taskLink.getAttribute("title") || taskLink.textContent || "")
@@ -243,6 +284,81 @@
   function loadDeadlines(callback) {
     chrome.storage.local.get([STORAGE_KEY], function (result) {
       callback(result[STORAGE_KEY] || []);
+    });
+  }
+
+  function saveSelectedCampus(campusValue) {
+    chrome.storage.local.set({
+      [CAMPUS_STORAGE_KEY]: campusValue,
+    });
+  }
+
+  function loadSelectedCampus(callback) {
+    chrome.storage.local.get([CAMPUS_STORAGE_KEY], function (result) {
+      const stored = result[CAMPUS_STORAGE_KEY];
+      if (!stored || CAMPUS_OPTIONS.indexOf(stored) === -1) {
+        callback(DEFAULT_CAMPUS);
+        return;
+      }
+      callback(stored);
+    });
+  }
+
+  function detectMentionedCampuses(taskName) {
+    const title = (taskName || "").toLowerCase();
+    const mentioned = [];
+
+    Object.keys(CAMPUS_KEYWORDS).forEach(function (campusKey) {
+      const aliases = CAMPUS_KEYWORDS[campusKey];
+      const hasAlias = aliases.some(function (alias) {
+        return title.indexOf(alias) !== -1;
+      });
+      if (hasAlias) {
+        mentioned.push(campusKey);
+      }
+    });
+
+    return mentioned;
+  }
+
+  function normalizeSelectedCampus(campusLabel) {
+    switch (campusLabel) {
+      case "Malabe":
+        return "malabe";
+      case "Northern Uni":
+        return "northern";
+      case "Kandy Uni":
+        return "kandy";
+      case "Matara Center":
+        return "matara";
+      case "Prorata":
+        return "prorata";
+      default:
+        return "all";
+    }
+  }
+
+  function filterByCampus(deadlines, campusLabel) {
+    const selectedKey = normalizeSelectedCampus(campusLabel);
+    if (selectedKey === "all") return deadlines;
+
+    return deadlines.filter(function (item) {
+      const title = (item.taskName || "").toLowerCase();
+
+      // Global tasks should always be visible.
+      if (title.indexOf("all centers") !== -1 || title.indexOf("all centre") !== -1) {
+        return true;
+      }
+
+      const mentioned = detectMentionedCampuses(item.taskName);
+
+      // Generic tasks without campus-specific wording should remain visible.
+      if (mentioned.length === 0) {
+        return true;
+      }
+
+      // Show if this title mentions the selected campus; otherwise hide it.
+      return mentioned.indexOf(selectedKey) !== -1;
     });
   }
 
@@ -409,7 +525,8 @@
       listRoot.removeChild(listRoot.firstChild);
     }
 
-    const filtered = filterDeadlines(deadlines, filter)
+    const campusFiltered = filterByCampus(deadlines, selectedCampus);
+    const filtered = filterDeadlines(campusFiltered, filter)
       .sort(function (a, b) {
         return parseDeadlineDate(a.dueDate) - parseDeadlineDate(b.dueDate);
       });
@@ -514,6 +631,9 @@
       + '<i class="fa fa-exclamation-triangle" aria-hidden="true"></i>Overdue'
       + "</button>"
       + "</div>"
+      + '<div class="cwa-campus-select-wrap">'
+      + '<select class="form-select form-select-sm cwa-campus-select" id="cwa-campus-select" aria-label="Select center"></select>'
+      + "</div>"
       + "</div>";
     menu.appendChild(header);
 
@@ -547,6 +667,15 @@
 
     const todoBtn = header.querySelector('button[data-filter="todo"]');
     const overdueBtn = header.querySelector('button[data-filter="overdue"]');
+    const campusSelect = header.querySelector("#cwa-campus-select");
+
+    CAMPUS_OPTIONS.forEach(function (optionLabel) {
+      const option = document.createElement("option");
+      option.value = optionLabel;
+      option.textContent = optionLabel;
+      campusSelect.appendChild(option);
+    });
+    campusSelect.value = selectedCampus;
 
     function rerenderFilteredList() {
       updateTabButtons(todoBtn, overdueBtn);
@@ -562,6 +691,12 @@
 
     overdueBtn.addEventListener("click", function () {
       activeFilter = "overdue";
+      rerenderFilteredList();
+    });
+
+    campusSelect.addEventListener("change", function () {
+      selectedCampus = campusSelect.value || DEFAULT_CAMPUS;
+      saveSelectedCampus(selectedCampus);
       rerenderFilteredList();
     });
 
@@ -601,19 +736,23 @@
   function init() {
     injectModernFilterStyles();
 
-    const scraped = scrapeDeadlines();
+    loadSelectedCampus(function (savedCampus) {
+      selectedCampus = savedCampus || DEFAULT_CAMPUS;
 
-    // Persist everything (both upcoming and past).
-    saveDeadlines(scraped);
+      const scraped = scrapeDeadlines();
 
-    loadDeadlines(function (saved) {
-      const normalized = saved
-        .map(normalizeStoredItem)
-        .filter(function (item) {
-          return !!item;
-        });
+      // Persist everything (both upcoming and past).
+      saveDeadlines(scraped);
 
-      renderDropdown(normalized.length > 0 ? normalized : scraped);
+      loadDeadlines(function (saved) {
+        const normalized = saved
+          .map(normalizeStoredItem)
+          .filter(function (item) {
+            return !!item;
+          });
+
+        renderDropdown(normalized.length > 0 ? normalized : scraped);
+      });
     });
   }
 
