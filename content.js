@@ -163,7 +163,7 @@
   // 1.  DATA SCRAPING
   // ─────────────────────────────────────────────────────────
   function scrapeDeadlines() {
-    console.group("[CWA] scrapeDeadlines() — CourseWeb exact-structure scraper");
+    console.group("[CWA] scrapeDeadlines() — Dashboard Upcoming Events scraper");
     console.log("[CWA] Page:", location.href);
 
     const deadlines = [];
@@ -171,213 +171,208 @@
     console.log("[CWA] Current time:", now.toISOString());
 
     // ───────────────────────────────────────────────────────────────────────
-    // HELPER: Parse Moodle date → JS Date
-    //   "Sunday, 22 March 2026, 11:30 PM" → Date object
+    // HELPER: Convert relative date strings into real Date objects
+    //   "Tomorrow, 11:30 PM"   → Date (tomorrow at 23:30)
+    //   "Today, 2:00 PM"       → Date (today at 14:00)
+    //   "Friday, 11:30 PM"     → Date (next Friday at 23:30)
+    //   "20 Mar, 12:00 AM"     → Date (20 March at 00:00)
+    //   "Saturday, 22 March, 11:30 PM" → Date
     // ───────────────────────────────────────────────────────────────────────
-    function parseMoodleDate(str) {
+    function parseRelativeDate(str) {
       if (!str) return null;
-      // Strip leading day-name: "Sunday, 22 March..." → "22 March..."
-      const cleaned = str.replace(/^[a-z]+,\s*/i, "").trim();
+      const raw = str.trim();
+      const lower = raw.toLowerCase();
+
+      // ── "Today, TIME" ──────────────────────────────────────────────────
+      if (lower.startsWith("today")) {
+        const timePart = raw.replace(/^today[,\s]*/i, "").trim();
+        const base = new Date();
+        return applyTimePart(base, timePart);
+      }
+
+      // ── "Tomorrow, TIME" ───────────────────────────────────────────────
+      if (lower.startsWith("tomorrow")) {
+        const timePart = raw.replace(/^tomorrow[,\s]*/i, "").trim();
+        const base = new Date();
+        base.setDate(base.getDate() + 1);
+        return applyTimePart(base, timePart);
+      }
+
+      // ── "Yesterday, TIME" ──────────────────────────────────────────────
+      if (lower.startsWith("yesterday")) {
+        const timePart = raw.replace(/^yesterday[,\s]*/i, "").trim();
+        const base = new Date();
+        base.setDate(base.getDate() - 1);
+        return applyTimePart(base, timePart);
+      }
+
+      // ── Named weekday: "Friday, 11:30 PM" ─────────────────────────────
+      const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+      const firstWord = lower.split(/[,\s]/)[0];
+      const dayIdx = dayNames.indexOf(firstWord);
+      if (dayIdx !== -1) {
+        const timePart = raw.replace(/^[a-z]+[,\s]*/i, "").trim();
+        const base = new Date();
+        let diff = dayIdx - base.getDay();
+        if (diff <= 0) diff += 7; // always next occurrence
+        base.setDate(base.getDate() + diff);
+        return applyTimePart(base, timePart);
+      }
+
+      // ── Standard date string: "22 March 2026, 11:30 PM" or "20 Mar, 12:00 AM"
+      //    Strip optional leading day-name: "Sunday, 22 March..." → "22 March..."
+      const cleaned = raw.replace(/^[a-z]+,\s*/i, "").trim();
       const d = new Date(cleaned);
-      return isNaN(d.getTime()) ? null : d;
+      if (!isNaN(d.getTime())) return d;
+
+      // Last resort — try raw parse
+      const raw2 = new Date(raw);
+      return isNaN(raw2.getTime()) ? null : raw2;
+    }
+
+    /**
+     * Takes a base Date and a time string like "11:30 PM" or "2:00 AM"
+     * and sets the hours/minutes on the base date.
+     */
+    function applyTimePart(baseDate, timeStr) {
+      if (!timeStr) {
+        baseDate.setHours(23, 59, 59, 0);
+        return baseDate;
+      }
+      // Match "11:30 PM", "2:00 AM", "14:30" etc.
+      const match = timeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+      if (match) {
+        let hours = parseInt(match[1], 10);
+        const mins = parseInt(match[2], 10);
+        const ampm = (match[3] || "").toUpperCase();
+        if (ampm === "PM" && hours < 12) hours += 12;
+        if (ampm === "AM" && hours === 12) hours = 0;
+        baseDate.setHours(hours, mins, 0, 0);
+      } else {
+        baseDate.setHours(23, 59, 59, 0);
+      }
+      return baseDate;
     }
 
     // ───────────────────────────────────────────────────────────────────────
-    // 1. MODULE NAME — from the breadcrumb <ol class="breadcrumb">
+    // 1. FIND ALL EVENT ITEMS IN THE "UPCOMING EVENTS" BLOCK
     //    Real DOM:
-    //    <ol class="breadcrumb">
-    //      <li class="breadcrumb-item"><a>Home</a></li>
-    //      <li class="breadcrumb-item"><a>My courses</a></li>
-    //      <li class="breadcrumb-item">
-    //        <a href="..." title="IT2130 - Operating Systems...">
-    //          IT2130 - ...
-    //        </a>
-    //      </li>
-    //      <li class="breadcrumb-item"><span>Practical sheet 7...</span></li>
-    //    </ol>
-    //    Strategy: Walk the breadcrumb <a> tags backwards, skip generic
-    //    names like Home/Dashboard, take the first course-code match.
+    //    <div class="event d-flex border-bottom pt-2 pb-3"
+    //         data-eventtype-course="1"
+    //         data-region="event-item">
+    //      <h4 class="d-flex mb-1 h6">
+    //        <a title="Practical sheet 7... is due">...</a>
+    //      </h4>
+    //      <div class="date small"><a>Tomorrow</a>, 11:30 PM</div>
+    //    </div>
     // ───────────────────────────────────────────────────────────────────────
-    let moduleName = null;
-
-    const crumbLinks = document.querySelectorAll(
-      ".breadcrumb .breadcrumb-item a, .breadcrumb li a, #page-navbar .breadcrumb a"
+    const eventItems = document.querySelectorAll(
+      '.event[data-region="event-item"], [data-region="event-item"], .event[data-eventtype-course]'
     );
-    console.log(`[CWA] Breadcrumb <a> tags found: ${crumbLinks.length}`);
+    console.log(`[CWA] Event items found: ${eventItems.length}`);
 
-    // Walk backwards — the course link is typically 2nd or 3rd from the end
-    const skipNames = /^(home|dashboard|my courses|site home|participants|grades|course)$/i;
-    for (let i = crumbLinks.length - 1; i >= 0; i--) {
-      const link = crumbLinks[i];
-      // Prefer the title attribute (it usually has the full course name)
-      const fullTitle = (link.getAttribute("title") || "").trim();
-      const linkText = link.textContent.trim();
-      const candidate = fullTitle || linkText;
+    if (eventItems.length === 0) {
+      console.warn(
+        "[CWA] No .event[data-region='event-item'] elements found.\n" +
+        "Make sure you are on the Dashboard page with the 'Upcoming events' block visible."
+      );
+      console.log("Scraped Deadlines:", deadlines);
+      console.groupEnd();
+      return deadlines;
+    }
 
-      if (!skipNames.test(linkText) && candidate.length > 3) {
-        // Check if it looks like a course code (e.g. "IT2130", "SE1020")
-        if (/^[A-Z]{2,4}\d{3,4}/i.test(candidate)) {
-          moduleName = candidate;
-          console.log(`[CWA] Module name via breadcrumb (crumb #${i}): "${moduleName}"`);
-          break;
+    // ───────────────────────────────────────────────────────────────────────
+    // 2. LOOP THROUGH EACH EVENT WITH try-catch ROBUSTNESS
+    // ───────────────────────────────────────────────────────────────────────
+    eventItems.forEach((event, idx) => {
+      try {
+        console.group(`[CWA] Event #${idx}`);
+
+        // ── TASK NAME ──────────────────────────────────────────────────────
+        //    From the <h4> > <a title="..."> attribute (has the full name).
+        //    Strip the " is due" suffix that Moodle appends.
+        //    Fallback: <a> text content or <h4> text content.
+        let taskName = null;
+        const h4Link = event.querySelector("h4 a[title], h4 a[data-action='view-event']");
+        if (h4Link) {
+          taskName = (h4Link.getAttribute("title") || h4Link.textContent).trim();
+        } else {
+          const h4 = event.querySelector("h4");
+          if (h4) taskName = h4.textContent.trim();
         }
-      }
-    }
 
-    // Fallback: if no course-code pattern found, take the last non-generic crumb
-    if (!moduleName) {
-      for (let i = crumbLinks.length - 1; i >= 0; i--) {
-        const text = crumbLinks[i].textContent.trim();
-        if (!skipNames.test(text) && text.length > 3) {
-          moduleName = text;
-          console.log(`[CWA] Module name via breadcrumb fallback (crumb #${i}): "${moduleName}"`);
-          break;
+        // Clean: strip " is due" suffix
+        if (taskName) {
+          taskName = taskName.replace(/\s+is\s+due$/i, "").trim().replace(/\s+/g, " ");
         }
-      }
-    }
 
-    console.log("[CWA] Final module name:", moduleName || "NOT FOUND");
+        console.log("[CWA] Task name:", taskName || "NOT FOUND");
 
-    // ───────────────────────────────────────────────────────────────────────
-    // 2. TASK NAME — from <h1 class="h2 mb-0">
-    //    Real DOM:
-    //    <h1 class="h2 mb-0">Practical sheet 7answer - Submission link...</h1>
-    //    Fallback: #region-main h2, [data-activityname], or any h1
-    // ───────────────────────────────────────────────────────────────────────
-    let taskName = null;
-
-    // Primary: the exact class from the user's HTML
-    const h1El = document.querySelector("h1.h2.mb-0");
-    if (h1El) {
-      taskName = h1El.textContent.trim().replace(/\s+/g, " ");
-      console.log(`[CWA] Task name via h1.h2.mb-0: "${taskName}"`);
-    }
-
-    // Fallback 1: the <h2> inside #region-main
-    if (!taskName) {
-      const h2El = document.querySelector("#region-main > span + h2, #region-main h2");
-      if (h2El) {
-        taskName = h2El.textContent.trim().replace(/\s+/g, " ");
-        console.log(`[CWA] Task name via #region-main h2: "${taskName}"`);
-      }
-    }
-
-    // Fallback 2: data-activityname attribute
-    if (!taskName) {
-      const infoEl = document.querySelector("[data-activityname]");
-      if (infoEl) {
-        taskName = infoEl.getAttribute("data-activityname").trim();
-        console.log(`[CWA] Task name via data-activityname: "${taskName}"`);
-      }
-    }
-
-    console.log("[CWA] Final task name:", taskName || "NOT FOUND");
-
-    // ───────────────────────────────────────────────────────────────────────
-    // 3. DUE DATE — from the submission status table
-    //    Real DOM (standard Moodle submission table):
-    //    <table class="generaltable">
-    //      <tr>
-    //        <th>Due date</th>
-    //        <td>Sunday, 22 March 2026, 11:30 PM</td>
-    //      </tr>
-    //    </table>
-    //    Fallback A: [data-region="activity-dates"] div containing "Due:"
-    //    Fallback B: .timeremaining cell
-    // ───────────────────────────────────────────────────────────────────────
-    let dueDate = null;
-
-    // Primary: scan all table rows for a <th> containing "Due date"
-    const tableRows = document.querySelectorAll("table.generaltable tr, .submissionsummarytable tr, .generaltable tr");
-    console.log(`[CWA] Table rows found: ${tableRows.length}`);
-
-    tableRows.forEach((tr) => {
-      const th = tr.querySelector("th");
-      const td = tr.querySelector("td");
-      if (th && td) {
-        const header = th.textContent.trim().toLowerCase();
-        if (header.includes("due date") || header === "due") {
-          dueDate = td.textContent.trim();
-          console.log(`[CWA] Due date via submission table: "${dueDate}"`);
+        // ── DUE DATE STRING ────────────────────────────────────────────────
+        //    From <div class="date small"> — get the full text content
+        //    e.g. "Tomorrow, 11:30 PM" or "Friday, 20 March, 12:00 AM"
+        let dueDateStr = null;
+        const dateDiv = event.querySelector(".date.small, .date, [data-region='event-date']");
+        if (dateDiv) {
+          dueDateStr = dateDiv.textContent.trim().replace(/\s+/g, " ");
         }
+
+        console.log("[CWA] Due date string:", dueDateStr || "NOT FOUND");
+
+        if (!taskName || !dueDateStr) {
+          console.log("[CWA] SKIPPED — missing task name or due date.");
+          console.groupEnd();
+          return;
+        }
+
+        // ── PARSE DATE & FILTER ────────────────────────────────────────────
+        const parsedDate = parseRelativeDate(dueDateStr);
+        console.log("[CWA] Parsed date:", parsedDate ? parsedDate.toISOString() : "PARSE FAILED");
+
+        if (parsedDate && parsedDate < now) {
+          console.log(`[CWA] SKIPPED — deadline has passed (${parsedDate.toLocaleDateString()}).`);
+          console.groupEnd();
+          return;
+        }
+
+        // ── MODULE NAME (best-effort from event context) ──────────────────
+        //    On the dashboard, events don't always show the course name.
+        //    Try: nearest course link, or data attribute, or "Dashboard"
+        let moduleName = "Dashboard";
+        const courseLink = event.querySelector("a[href*='/course/view.php']");
+        if (courseLink) {
+          moduleName = (courseLink.getAttribute("title") || courseLink.textContent).trim();
+        }
+
+        // ── DEDUPLICATION ──────────────────────────────────────────────────
+        const alreadyAdded = deadlines.some((d) => d.taskName === taskName);
+        if (alreadyAdded) {
+          console.log(`[CWA] SKIPPED — duplicate: "${taskName}".`);
+          console.groupEnd();
+          return;
+        }
+
+        // ── ACCEPT ─────────────────────────────────────────────────────────
+        const item = {
+          moduleName: moduleName,
+          taskName: taskName,
+          dueDate: dueDateStr,
+        };
+        deadlines.push(item);
+        console.log("[CWA] ACCEPTED:", item);
+        console.groupEnd();
+
+      } catch (err) {
+        console.error(`[CWA] Error processing event #${idx}:`, err);
+        console.groupEnd();
       }
     });
 
-    // Fallback A: [data-region="activity-dates"] div with "Due:"
-    if (!dueDate) {
-      const activityDates = document.querySelector('[data-region="activity-dates"]');
-      if (activityDates) {
-        activityDates.querySelectorAll("div").forEach((div) => {
-          const match = div.textContent.trim().match(/^Due:\s*(.+)$/i);
-          if (match) {
-            dueDate = match[1].trim();
-            console.log(`[CWA] Due date via activity-dates: "${dueDate}"`);
-          }
-        });
-      }
-    }
-
-    // Fallback B: .timeremaining cell
-    if (!dueDate) {
-      const trCell = document.querySelector(".timeremaining");
-      if (trCell) {
-        dueDate = trCell.textContent.trim();
-        console.log(`[CWA] Due date via .timeremaining: "${dueDate}"`);
-      }
-    }
-
-    console.log("[CWA] Final due date:", dueDate || "NOT FOUND");
-
     // ───────────────────────────────────────────────────────────────────────
-    // 4. GATE: "Add submission" = pending, skip if already submitted
-    // ───────────────────────────────────────────────────────────────────────
-    const allBtns = document.querySelectorAll("button, a, .btn");
-    const hasAddSubmission = Array.from(allBtns).some(
-      (el) => el.textContent.trim().toLowerCase() === "add submission"
-    );
-    console.log("[CWA] 'Add submission' button:", hasAddSubmission ? "FOUND" : "NOT FOUND");
-
-    const pageText = document.body.textContent.toLowerCase();
-    const isSubmitted =
-      pageText.includes("edit submission") ||
-      pageText.includes("remove submission") ||
-      pageText.includes("submitted for grading");
-
-    // ───────────────────────────────────────────────────────────────────────
-    // 5. COLLECT — only if we have all three fields
-    // ───────────────────────────────────────────────────────────────────────
-    try {
-      if (!taskName || !dueDate) {
-        console.warn("[CWA] SKIPPED — missing task name or due date.");
-      } else if (isSubmitted) {
-        console.warn("[CWA] SKIPPED — assignment already submitted.");
-      } else if (!hasAddSubmission) {
-        console.warn("[CWA] SKIPPED — no 'Add submission' button found (not pending).");
-      } else {
-        // ── Date comparison: only keep future deadlines ─────────────────
-        const parsedDate = parseMoodleDate(dueDate);
-        if (parsedDate && parsedDate < now) {
-          console.warn(`[CWA] SKIPPED — deadline has passed (${parsedDate.toLocaleDateString()}).`);
-        } else {
-          // ── Build the data object ────────────────────────────────────
-          const item = {
-            moduleName: moduleName || "Unknown Module",
-            taskName: taskName,
-            dueDate: dueDate,
-          };
-          deadlines.push(item);
-          console.log("[CWA] ACCEPTED:", item);
-        }
-      }
-    } catch (err) {
-      console.error("[CWA] Error during collection:", err);
-    }
-
-    // ───────────────────────────────────────────────────────────────────────
-    // 6. SUMMARY
+    // 3. SUMMARY
     // ───────────────────────────────────────────────────────────────────────
     if (deadlines.length === 0) {
-      console.warn("[CWA] No upcoming pending deadlines found on this page.");
+      console.warn("[CWA] No upcoming deadlines found in the events block.");
     } else {
       console.info(`[CWA] Scrape complete — ${deadlines.length} upcoming deadline(s).`);
     }
