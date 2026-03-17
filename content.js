@@ -234,8 +234,19 @@
         .trim()
         .replace(/\s+/g, " ");
 
-      const moduleNode = event.querySelector(".course-name, .coursename, a[href*='/course/view.php'], [data-region='course-name']");
-      const moduleName = moduleNode ? moduleNode.textContent.trim().replace(/\s+/g, " ") : "";
+      const moduleMetaNode = event.querySelector("small.mb-0, small");
+      const moduleMetaText = moduleMetaNode
+        ? moduleMetaNode.textContent.trim().replace(/\s+/g, " ")
+        : "";
+
+      // Example small-tag text: "Assignment is due · IT2130 - Operating Systems... [2026/JAN]"
+      // Keep the portion after the middle dot as the real module string.
+      let moduleString = "";
+      if (moduleMetaText.indexOf("·") !== -1) {
+        moduleString = moduleMetaText.split("·").slice(1).join("·").trim();
+      }
+
+      const moduleAcronym = generateAcronym(moduleString);
 
       const dateNode = event.querySelector(".date.small, .date, [data-region='event-date'], time[datetime]");
       const dueDate = dateNode ? dateNode.textContent.trim().replace(/\s+/g, " ") : "";
@@ -257,10 +268,10 @@
       if (duplicate) return;
 
       deadlines.push({
-        moduleName: moduleName,
         taskName: taskName,
         dueDate: dueDate,
         url: url,
+        moduleAcronym: moduleAcronym,
       });
     });
 
@@ -299,10 +310,25 @@
     });
   }
 
-  function detectMentionedCampuses(taskName) {
-    const fullTitle = String(taskName || "").toLowerCase().trim();
+  function extractCampusScope(taskName) {
+    const rawTitle = String(taskName || "");
+    const parenthesized = [];
+
+    rawTitle.replace(/\(([^)]*)\)/g, function (_match, group) {
+      if (group) parenthesized.push(group);
+      return _match;
+    });
+
+    // Capture ALL-CAPS chunks that often carry center hints.
+    const uppercaseChunks = rawTitle.match(/\b[A-Z][A-Z\s]{2,}\b/g) || [];
+
+    return parenthesized.concat(uppercaseChunks).join(" ").toLowerCase().trim();
+  }
+
+  function detectMentionedCampuses(scopeText) {
+    const scope = String(scopeText || "").toLowerCase().trim();
     return CENTER_KEYWORDS.filter(function (center) {
-      return fullTitle.includes(center);
+      return scope.includes(center);
     });
   }
 
@@ -355,37 +381,32 @@
   }
 
   function filterByCampus(deadlines, campusLabel) {
+    const allModifiers = ["MALABE", "KANDY", "MATARA", "NORTHERN", "PRORATA", "ALL CENTERS"];
     const selectedKey = normalizeSelectedCampus(campusLabel);
-    const selectedCampusLower = String(campusLabel || "").toLowerCase().trim();
+    const selectedCampusUpper = String(campusLabel || "").toUpperCase().trim();
+    const selectedKeyUpper = String(selectedKey || "").toUpperCase().trim();
 
     return deadlines.filter(function (item) {
-      const fullTitle = String(item.taskName || "").toLowerCase().trim();
-      const mentioned = detectMentionedCampuses(item.taskName);
+      const titleUpper = String(item.taskName || "").toUpperCase().trim();
 
-      // 1) Show all if user selected All Centers.
+      // Rule 1 (Show All)
       if (campusLabel === DEFAULT_CAMPUS || selectedKey === "all") return true;
 
-      // 2) Show if task is explicitly for all centers.
-      if (fullTitle.includes("all centers")) return true;
+      // Rule 2 (Exact Match)
+      if (selectedCampusUpper && titleUpper.includes(selectedCampusUpper)) return true;
+      if (selectedKeyUpper && selectedKeyUpper !== "ALL" && titleUpper.includes(selectedKeyUpper)) return true;
 
-      // 3) Show if title mentions selected campus.
-      if (fullTitle.includes(selectedCampusLower) || fullTitle.includes(selectedKey)) return true;
+      // Rule 3 (Strict Exclusion)
+      for (let i = 0; i < allModifiers.length; i += 1) {
+        const modifier = allModifiers[i];
+        if (!titleUpper.includes(modifier)) continue;
 
-      // 4) Hide if it mentions any other center keyword.
-      const hasOtherCenter = CENTER_KEYWORDS
-        .filter(function (center) {
-          return center !== selectedKey;
-        })
-        .some(function (center) {
-          return fullTitle.includes(center);
-        });
+        const isSelectedModifier = modifier === selectedCampusUpper || modifier === selectedKeyUpper;
+        if (!isSelectedModifier) return false;
+      }
 
-      if (hasOtherCenter) return false;
-
-      // 5) Generic task (no center keywords) should be shown.
-      if (mentioned.length === 0) return true;
-
-      return false;
+      // Rule 4 (Generic Allowed)
+      return true;
     });
   }
 
@@ -407,7 +428,7 @@
     const badge = document.createElement("span");
     badge.className = "badge rounded-pill bg-primary me-2";
     badge.style.cssText = "font-size: 0.75em;";
-    badge.textContent = generateAcronym(item.moduleName || item.taskName);
+    badge.textContent = item.moduleAcronym || "GEN";
 
     const link = document.createElement("a");
     link.href = item.url || "#";
@@ -505,7 +526,7 @@
     const acronymBadge = document.createElement("span");
     acronymBadge.className = "badge rounded-pill bg-primary me-2";
     acronymBadge.style.cssText = "font-size: 0.75em;";
-    acronymBadge.textContent = generateAcronym(item.moduleName || item.taskName);
+    acronymBadge.textContent = item.moduleAcronym || "GEN";
 
     const link = document.createElement("a");
     link.href = item.url || "#";
@@ -760,13 +781,13 @@
   function normalizeStoredItem(item) {
     if (!item) return null;
 
-    const moduleName = item.moduleName || "";
+    const moduleAcronym = item.moduleAcronym || generateAcronym(item.moduleName || "");
     const taskName = item.taskName || item.label || "";
     const dueDate = item.dueDate || item.due || "";
     const url = item.url || "";
 
     if (!taskName || !dueDate) return null;
-    return { moduleName: moduleName, taskName: taskName, dueDate: dueDate, url: url };
+    return { moduleAcronym: moduleAcronym, taskName: taskName, dueDate: dueDate, url: url };
   }
 
   function init() {
