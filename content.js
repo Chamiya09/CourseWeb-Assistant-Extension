@@ -1,27 +1,33 @@
 // ============================================================
-// CourseWeb Assistant - content.js  v2.0
-// Scrapes deadlines, saves to chrome.storage, injects UI.
+// CourseWeb Assistant - content.js  v3.0
+// Real-time countdown + progress bars.
 // ============================================================
 
 (function () {
   "use strict";
 
   // ─────────────────────────────────────────────────────────
-  // 1.  DATA SCRAPING
-  //     Selectors below are PLACEHOLDERS — inspect CourseWeb's
-  //     real DOM and replace them with the actual class names.
+  // CONSTANTS
   // ─────────────────────────────────────────────────────────
+
+  // PLACEHOLDER selectors — update after inspecting the real DOM
   const SELECTORS = {
-    activityItem: ".activity-item, .assignment-card",  // wrapper for each task
-    moduleName: ".instancename, .activity-name",     // element holding the title
-    dueDate: ".deadline-date, .due-date",         // element holding the date
+    activityItem: ".activity-item, .assignment-card",
+    moduleName: ".instancename, .activity-name",
+    dueDate: ".deadline-date, .due-date",
+    navBar: ".navbar-nav",
   };
 
-  /**
-   * scrapeDeadlines()
-   * Walks the page DOM, extracts module names + due dates,
-   * and returns an array of { label, due } objects.
-   */
+  // How long each deadline "window" is (used to calculate progress %).
+  // Default: 7 days. Adjust as needed.
+  const DEADLINE_WINDOW_DAYS = 7;
+
+  // Holds the live setInterval ID so we can clear it if needed.
+  let countdownInterval = null;
+
+  // ─────────────────────────────────────────────────────────
+  // 1.  DATA SCRAPING
+  // ─────────────────────────────────────────────────────────
   function scrapeDeadlines() {
     const items = document.querySelectorAll(SELECTORS.activityItem);
     const deadlines = [];
@@ -29,14 +35,10 @@
     items.forEach((item) => {
       const nameEl = item.querySelector(SELECTORS.moduleName);
       const dateEl = item.querySelector(SELECTORS.dueDate);
-
       if (nameEl && dateEl) {
         const label = nameEl.textContent.trim();
         const due = dateEl.textContent.trim();
-
-        if (label && due) {
-          deadlines.push({ label, due });
-        }
+        if (label && due) deadlines.push({ label, due });
       }
     });
 
@@ -44,217 +46,329 @@
   }
 
   // ─────────────────────────────────────────────────────────
-  // 2.  CHROME STORAGE  — Save & Load
+  // 2.  CHROME STORAGE
   // ─────────────────────────────────────────────────────────
-
-  /**
-   * saveDeadlines(deadlines)
-   * Persists the scraped array to chrome.storage.local.
-   */
   function saveDeadlines(deadlines) {
     chrome.storage.local.set({ cwa_deadlines: deadlines }, () => {
-      console.info(`[CourseWeb Assistant] 💾 Saved ${deadlines.length} deadline(s).`);
+      console.info(`[CWA] Saved ${deadlines.length} deadline(s).`);
     });
   }
 
-  /**
-   * loadDeadlines(callback)
-   * Reads saved deadlines back from chrome.storage.local,
-   * then calls callback(deadlines).
-   */
   function loadDeadlines(callback) {
     chrome.storage.local.get(["cwa_deadlines"], (result) => {
-      const saved = result.cwa_deadlines || [];
-      callback(saved);
+      callback(result.cwa_deadlines || []);
     });
   }
 
   // ─────────────────────────────────────────────────────────
-  // 3.  UI HELPERS — Build dropdown items
+  // 3.  COUNTDOWN + PROGRESS HELPERS
   // ─────────────────────────────────────────────────────────
 
   /**
-   * Returns a badge class AND an optional FA warning icon HTML
-   * based on how soon the deadline is.
+   * Parse a due-date string into a Date object.
+   * Tries native Date.parse first; falls back to keyword heuristics.
    */
-  function getUrgencyInfo(dueText) {
-    const lower = dueText.toLowerCase();
-    if (lower.includes("today") || lower.includes("overdue"))
-      return { badgeClass: "bg-danger", icon: '<i class="fa fa-exclamation-circle" aria-hidden="true" style="margin-right:3px;"></i>' };
-    if (lower.includes("tomorrow"))
-      return { badgeClass: "bg-warning text-dark", icon: '<i class="fa fa-exclamation-triangle" aria-hidden="true" style="margin-right:3px;"></i>' };
-    return { badgeClass: "bg-secondary", icon: "" };
+  function parseDeadlineDate(dueStr) {
+    const lower = dueStr.toLowerCase().trim();
+
+    // Keyword shortcuts
+    const now = new Date();
+    if (lower === "today") { now.setHours(23, 59, 59, 0); return now; }
+    if (lower === "tomorrow") { now.setDate(now.getDate() + 1); now.setHours(23, 59, 59, 0); return now; }
+    if (lower === "overdue") return new Date(now - 1);   // 1ms in the past
+
+    // Try native parse (handles "Mar 20", "2026-03-20", "20 March 2026", etc.)
+    const parsed = new Date(dueStr);
+    if (!isNaN(parsed)) return parsed;
+
+    // Give up — return null to show "Unknown"
+    return null;
   }
 
-  /** Builds one <li> row for the dropdown list. */
-  function createDeadlineItem(label, due) {
+  /**
+   * Build a "Xd Xh Xm Xs" string from a positive millisecond delta.
+   */
+  function formatCountdown(msLeft) {
+    if (msLeft <= 0) return "Overdue";
+
+    const totalSec = Math.floor(msLeft / 1000);
+    const d = Math.floor(totalSec / 86400);
+    const h = Math.floor((totalSec % 86400) / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+
+    const parts = [];
+    if (d > 0) parts.push(`${d}d`);
+    if (h > 0) parts.push(`${h}h`);
+    if (m > 0) parts.push(`${m}m`);
+    parts.push(`${s}s`);
+
+    return parts.join(" ") + " left";
+  }
+
+  /**
+   * Returns Bootstrap progress-bar colour class based on days remaining.
+   *   < 2 days  → bg-danger  (red)
+   *   2–5 days  → bg-warning (yellow)
+   *   > 5 days  → bg-success (green)
+   */
+  function progressBarClass(msLeft) {
+    const days = msLeft / (1000 * 60 * 60 * 24);
+    if (days < 2) return "bg-danger";
+    if (days <= 5) return "bg-warning";
+    return "bg-success";
+  }
+
+  /**
+   * Compute how much of the deadline "window" has elapsed (0–100%).
+   * 100% = deadline has passed.
+   */
+  function progressPercent(targetDate) {
+    const windowMs = DEADLINE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+    const startMs = targetDate.getTime() - windowMs;
+    const now = Date.now();
+    const elapsed = now - startMs;
+    return Math.min(100, Math.max(0, Math.round((elapsed / windowMs) * 100)));
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // 4.  BUILD ONE DEADLINE ROW
+  // ─────────────────────────────────────────────────────────
+  /**
+   * Creates a rich <li> card for a single deadline.
+   * Data attributes store the ISO target date so the interval
+   * can update the DOM without rebuilding elements.
+   */
+  function createDeadlineCard(label, due) {
+    const targetDate = parseDeadlineDate(due);
+    const targetISO = targetDate ? targetDate.toISOString() : null;
+
     const li = document.createElement("li");
+    li.style.cssText = "padding: 8px 16px; border-bottom: 1px solid #f0f0f0;";
 
-    const a = document.createElement("a");
-    a.className = "dropdown-item d-flex justify-content-between align-items-center py-2";
-    a.href = "#";
+    // ── Module name row ──────────────────────────────────
+    const nameRow = document.createElement("div");
+    nameRow.className = "d-flex align-items-center";
+    nameRow.style.marginBottom = "4px";
 
-    // Module name
+    const icon = document.createElement("i");
+    icon.className = "fa fa-book";
+    icon.setAttribute("aria-hidden", "true");
+    icon.style.cssText = "color:#6c757d; margin-right:7px; font-size:.85rem;";
+
     const nameSpan = document.createElement("span");
-    nameSpan.className = "cwa-item-label";
-    nameSpan.style.cssText = "max-width:170px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;";
+    nameSpan.style.cssText = "font-weight:600; font-size:.88rem; color:#212529; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:230px;";
+    nameSpan.title = label;
     nameSpan.textContent = label;
 
-    // Due-date badge with conditional FA warning icon
-    const { badgeClass, icon } = getUrgencyInfo(due);
-    const badge = document.createElement("span");
-    badge.className = `badge ${badgeClass} ms-2 flex-shrink-0 d-flex align-items-center`;
-    badge.style.fontSize = "0.72rem";
-    badge.innerHTML = icon + due;
+    nameRow.appendChild(icon);
+    nameRow.appendChild(nameSpan);
 
-    a.appendChild(nameSpan);
-    a.appendChild(badge);
-    li.appendChild(a);
+    // ── Countdown row ────────────────────────────────────
+    const countdownRow = document.createElement("div");
+    countdownRow.className = "d-flex align-items-center";
+    countdownRow.style.marginBottom = "6px";
+
+    const clockIcon = document.createElement("i");
+    clockIcon.className = "fa fa-clock-o";
+    clockIcon.setAttribute("aria-hidden", "true");
+    clockIcon.style.cssText = "color:#6c757d; margin-right:7px; font-size:.8rem;";
+
+    const countdownSpan = document.createElement("span");
+    countdownSpan.className = "cwa-countdown";
+    countdownSpan.style.cssText = "font-size:.80rem; color:#495057;";
+
+    if (targetDate) {
+      countdownSpan.dataset.target = targetISO;
+      const msLeft = targetDate - Date.now();
+      countdownSpan.textContent = formatCountdown(msLeft);
+    } else {
+      countdownSpan.textContent = "Due: " + due;
+    }
+
+    countdownRow.appendChild(clockIcon);
+    countdownRow.appendChild(countdownSpan);
+
+    // ── Progress bar ─────────────────────────────────────
+    const progressWrap = document.createElement("div");
+    progressWrap.className = "progress";
+    progressWrap.style.cssText = "height:6px; border-radius:4px; background:#e9ecef;";
+
+    const bar = document.createElement("div");
+    bar.className = "cwa-bar progress-bar";
+    bar.setAttribute("role", "progressbar");
+    bar.style.cssText = "border-radius:4px; transition: width .8s ease, background-color .8s ease;";
+
+    if (targetDate) {
+      bar.dataset.target = targetISO;
+      const pct = progressPercent(targetDate);
+      const msLeft = targetDate - Date.now();
+      const barClass = progressBarClass(msLeft);
+      bar.style.width = pct + "%";
+      bar.classList.add(barClass);
+    } else {
+      bar.style.width = "0%";
+      bar.classList.add("bg-secondary");
+    }
+
+    progressWrap.appendChild(bar);
+
+    li.appendChild(nameRow);
+    li.appendChild(countdownRow);
+    li.appendChild(progressWrap);
+
     return li;
   }
 
   // ─────────────────────────────────────────────────────────
-  // 4.  UI BUILD — Assemble the full dropdown <li>
+  // 5.  LIVE TICKER — updates all countdown/bar elements
+  // ─────────────────────────────────────────────────────────
+  function startCountdownTicker() {
+    // Clear any previous interval
+    if (countdownInterval) clearInterval(countdownInterval);
+
+    countdownInterval = setInterval(() => {
+      const now = Date.now();
+
+      // Update every countdown span
+      document.querySelectorAll(".cwa-countdown[data-target]").forEach((span) => {
+        const target = new Date(span.dataset.target);
+        span.textContent = formatCountdown(target - now);
+      });
+
+      // Update every progress bar
+      document.querySelectorAll(".cwa-bar[data-target]").forEach((bar) => {
+        const target = new Date(bar.dataset.target);
+        const msLeft = target - now;
+        const pct = progressPercent(target);
+        const newClass = progressBarClass(msLeft);
+
+        bar.style.width = pct + "%";
+
+        // Swap colour class if urgency has changed
+        ["bg-danger", "bg-warning", "bg-success", "bg-secondary"].forEach(
+          (cls) => bar.classList.remove(cls)
+        );
+        bar.classList.add(newClass);
+      });
+    }, 1000);   // fires every second
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // 6.  BUILD FULL DROPDOWN
   // ─────────────────────────────────────────────────────────
   function buildDropdown(deadlines) {
-    // ── Outer nav-item wrapper ──────────────────────────────
     const navItem = document.createElement("li");
     navItem.className = "nav-item dropdown";
     navItem.id = "cwa-deadlines-menu";
 
-    // ── Toggle link (matches Moodle/Bootstrap navbar style) ─
+    // Toggle button
     const toggle = document.createElement("a");
     toggle.className = "nav-link dropdown-toggle";
     toggle.href = "#";
     toggle.setAttribute("role", "button");
     toggle.setAttribute("data-bs-toggle", "dropdown");   // Bootstrap 5
-    toggle.setAttribute("data-toggle", "dropdown");      // Bootstrap 4 fallback
+    toggle.setAttribute("data-toggle", "dropdown");      // Bootstrap 4
     toggle.setAttribute("aria-expanded", "false");
     toggle.innerHTML = '<i class="fa fa-calendar-check-o" aria-hidden="true" style="margin-right:5px;"></i>My Deadlines';
+    toggle.style.cssText = "font-weight:600; color:rgba(255,255,255,.9) !important; cursor:pointer; transition:color .15s ease;";
 
-    // Subtle inline style overrides so we blend with the native navbar
-    toggle.style.cssText = [
-      "font-weight: 600",
-      "color: rgba(255,255,255,.9) !important",           // Moodle default nav text
-      "cursor: pointer",
-      "transition: color .15s ease",
-    ].join("; ");
-
-    toggle.addEventListener("mouseenter", () => {
-      toggle.style.color = "#ffffff !important";
-      toggle.style.textDecoration = "none";
-    });
-
-    // ── Dropdown menu panel ─────────────────────────────────
+    // Dropdown panel — wider to accommodate progress bars
     const menu = document.createElement("ul");
-    menu.className = "dropdown-menu dropdown-menu-end shadow-sm";
+    menu.className = "dropdown-menu dropdown-menu-end shadow";
     menu.style.cssText = [
-      "min-width: 290px",
+      "min-width: 360px",
       "background: #ffffff",
       "border: 1px solid rgba(0,0,0,.1)",
       "border-radius: 8px",
-      "padding: 4px 0",
+      "padding: 6px 0",
     ].join("; ");
 
     // Header
     const header = document.createElement("li");
     header.innerHTML = `
-      <h6 class="dropdown-header d-flex align-items-center gap-1" style="font-size:.8rem; letter-spacing:.04em;">
-        <i class="fa fa-calendar" aria-hidden="true" style="margin-right:5px;"></i><span>UPCOMING DEADLINES</span>
-      </h6>`;
+      <div style="padding:8px 16px 6px; border-bottom:1px solid #e9ecef;">
+        <span style="font-size:.75rem; font-weight:700; letter-spacing:.07em; color:#6c757d; text-transform:uppercase;">
+          <i class="fa fa-calendar" aria-hidden="true" style="margin-right:6px;"></i>Upcoming Deadlines
+        </span>
+      </div>`;
     menu.appendChild(header);
 
-    const hr1 = document.createElement("li");
-    hr1.innerHTML = `<hr class="dropdown-divider my-1">`;
-    menu.appendChild(hr1);
-
-    // Deadline rows  (fallback message if none found)
+    // Deadline cards
     if (deadlines.length === 0) {
       const empty = document.createElement("li");
       empty.innerHTML = `
-        <span class="dropdown-item text-muted fst-italic" style="font-size:.88rem;">
-          No deadlines found on this page.
-        </span>`;
+        <div style="padding:14px 16px; text-align:center; color:#6c757d; font-size:.87rem; font-style:italic;">
+          <i class="fa fa-inbox" aria-hidden="true" style="margin-right:6px;"></i>No deadlines saved.
+        </div>`;
       menu.appendChild(empty);
     } else {
       deadlines.forEach(({ label, due }) => {
-        menu.appendChild(createDeadlineItem(label, due));
+        menu.appendChild(createDeadlineCard(label, due));
       });
     }
 
-    // Footer
-    const hr2 = document.createElement("li");
-    hr2.innerHTML = `<hr class="dropdown-divider my-1">`;
-    menu.appendChild(hr2);
-
+    // Footer — re-scan button
     const footer = document.createElement("li");
-    const refreshLink = document.createElement("a");
-    refreshLink.className = "dropdown-item text-center text-primary";
-    refreshLink.href = "#";
-    refreshLink.style.fontSize = ".85rem";
-    refreshLink.innerHTML = '<i class="fa fa-refresh" aria-hidden="true" style="margin-right:5px;"></i>Re-scan Deadlines';
+    footer.innerHTML = `<div style="border-top:1px solid #e9ecef;"></div>`;
+    const rescanLink = document.createElement("a");
+    rescanLink.className = "dropdown-item text-center text-primary";
+    rescanLink.href = "#";
+    rescanLink.style.cssText = "font-size:.84rem; padding:8px 0;";
+    rescanLink.innerHTML = '<i class="fa fa-refresh" aria-hidden="true" style="margin-right:5px;"></i>Re-scan Deadlines';
 
-    // Re-scan: scrape → save → rebuild the menu
-    refreshLink.addEventListener("click", (e) => {
+    rescanLink.addEventListener("click", (e) => {
       e.preventDefault();
       const fresh = scrapeDeadlines();
-      saveDeadlines(fresh);
-      renderDropdown(fresh);   // re-render in place
+      if (fresh.length > 0) saveDeadlines(fresh);
+      renderDropdown(fresh);
     });
 
-    footer.appendChild(refreshLink);
+    const footerLi = document.createElement("li");
+    footerLi.appendChild(rescanLink);
     menu.appendChild(footer);
+    menu.appendChild(footerLi);
 
     navItem.appendChild(toggle);
     navItem.appendChild(menu);
-
     return navItem;
   }
 
   // ─────────────────────────────────────────────────────────
-  // 5.  RENDER — Insert / replace dropdown in the navbar
+  // 7.  RENDER
   // ─────────────────────────────────────────────────────────
   function renderDropdown(deadlines) {
     const existing = document.getElementById("cwa-deadlines-menu");
     const newMenu = buildDropdown(deadlines);
 
     if (existing) {
-      // Replace in-place so the position in the navbar is preserved
       existing.replaceWith(newMenu);
     } else {
-      // PLACEHOLDER selector — update after inspecting CourseWeb's real DOM
-      const navBar = document.querySelector(".navbar-nav");
+      const navBar = document.querySelector(SELECTORS.navBar);
       if (!navBar) {
-        console.warn("[CourseWeb Assistant] ⚠️ Navbar not found. Update the selector.");
+        console.warn("[CWA] Navbar not found. Update SELECTORS.navBar.");
         return;
       }
       navBar.appendChild(newMenu);
     }
 
-    console.info("[CourseWeb Assistant] ✅ Dropdown rendered.");
+    // Start / restart the live 1-second ticker
+    startCountdownTicker();
+    console.info("[CWA] Dropdown rendered with real-time countdowns.");
   }
 
   // ─────────────────────────────────────────────────────────
-  // 6.  ENTRY POINT
-  //     • Scrape the page → save fresh data
-  //     • Load from storage → inject the UI
+  // 8.  ENTRY POINT
   // ─────────────────────────────────────────────────────────
   function init() {
-    // Scrape immediately and persist
     const scraped = scrapeDeadlines();
-    if (scraped.length > 0) {
-      saveDeadlines(scraped);
-    }
+    if (scraped.length > 0) saveDeadlines(scraped);
 
-    // Always load from storage so previously saved deadlines
-    // show up even on pages that have no activity listings.
     loadDeadlines((saved) => {
-      const toDisplay = saved.length > 0 ? saved : scraped;
-      renderDropdown(toDisplay);
+      renderDropdown(saved.length > 0 ? saved : scraped);
     });
   }
 
-  // Wait for full DOM before running
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
   } else {
