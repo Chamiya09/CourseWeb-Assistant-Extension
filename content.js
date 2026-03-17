@@ -13,33 +13,109 @@
   // Navbar selector (used by renderDropdown)
   const NAVBAR_SELECTOR = ".navbar-nav";
 
-  // Each strategy is tried in order — first one that returns results wins.
+  // Each strategy is tried in priority order.
+  // First one that finds AND accepts at least one item wins.
   const STRATEGIES = [
+    // ── Standard Moodle course page (most common) ────────────
     {
-      name: "modtype_assign rows",
+      name: "li.activity.assign",
+      container: "li.activity.assign",
+      label: ".instancename, .activityname",
+      date: ".text-info, .duedate, .activity-dates .text-info",
+    },
+    {
+      name: "li.modtype_assign",
       container: "li.modtype_assign",
       label: ".instancename",
-      date: ".text-info, .duedate, [data-region='activity-dates'] .text-info",
+      date: ".text-info, .duedate",
+    },
+    // ── Boost theme / Moodle 4.x course index ───────────────
+    {
+      name: "data-region=activity-item (Moodle 4)",
+      container: "[data-region='activity-item']",
+      label: "[data-region='activity-name'], .activityname",
+      date: "[data-region='activity-dates'] .text-info, .activity-altcontent",
     },
     {
-      name: "calendar-event blocks",
-      container: ".event",
-      label: ".referer a, .eventname a, h3.name",
-      date: ".date, .col.text-truncate, time",
+      name: "data-activityname attribute",
+      container: "[data-activityname]",
+      label: ".activityname, .instancename, [data-activityname]",
+      date: ".text-info, .duedate, .activity-dates",
+    },
+    // ── Upcoming events / Timeline block ────────────────────
+    {
+      name: "timeline event items",
+      container: "[data-region='event-list-item'], .event-list-item",
+      label: "[data-region='event-name'] a, .eventname a",
+      date: "[data-region='event-date'], .date, time[datetime]",
     },
     {
-      name: "assign-overview table rows",
-      container: "table.generaltable tr",
-      label: "td:first-child",
+      name: "calendar .event blocks",
+      container: ".event[data-event-activitytype='assign']",
+      label: ".referer a, .eventname a, h3.name a",
+      date: ".date, time",
+    },
+    // ── My Overview / Dashboard cards ───────────────────────
+    {
+      name: "overview-course-list items",
+      container: "[data-region='course-content'] [data-region='event-list-item']",
+      label: "[data-region='event-name'] a",
+      date: "[data-region='event-date']",
+    },
+    {
+      name: ".card-body.courseinfo rows",
+      container: ".card-body .courseinfo",
+      label: ".fullname, h4",
+      date: ".text-truncate .fa-clock-o + span, .fa-clock-o + span",
+    },
+    // ── Assignment submission / grading tables ───────────────
+    {
+      name: "generaltable tbody rows",
+      container: "table.generaltable tbody tr",
+      label: "td:nth-child(1)",
       date: "td:nth-child(2), td:nth-child(3)",
     },
+    // ── Broad generic Moodle activity list ───────────────────
     {
-      name: "card activities (fallback)",
+      name: "#region-main li.activity",
+      container: "#region-main li.activity",
+      label: ".activityname, .instancename",
+      date: ".text-info, .duedate, time",
+    },
+    {
+      name: ".course-content .activity",
+      container: ".course-content .activity",
+      label: ".activityname, .instancename",
+      date: ".text-info, .duedate",
+    },
+    // ── Last-resort fallback ─────────────────────────────────
+    {
+      name: "any .activity-item / .assignment-card",
       container: ".activity-item, .assignment-card",
       label: ".activityname, .instancename, .activity-name",
-      date: ".deadline-date, .due-date, .duedate",
+      date: ".deadline-date, .due-date, .duedate, .text-info",
     },
   ];
+
+  // ── Diagnostic helper (call from DevTools console) ────────
+  // Usage: cwaDiagnose()
+  window.cwaDiagnose = function () {
+    console.group("[CWA] cwaDiagnose() — testing all strategies on this page");
+    STRATEGIES.forEach((s) => {
+      const hits = document.querySelectorAll(s.container);
+      console.log(
+        `%c${hits.length > 0 ? "✔" : "✘"} [${s.name}]%c  container='${s.container}'  → ${hits.length} element(s)`,
+        hits.length > 0 ? "color:green;font-weight:bold" : "color:red;font-weight:bold",
+        "color:inherit"
+      );
+      if (hits.length > 0 && hits.length < 5) {
+        hits.forEach((el, i) => console.log(`  #${i}:`, el));
+      }
+    });
+    console.groupEnd();
+    console.info("[CWA] Tip: call cwaDiagnose() on ANY courseweb.sliit.lk page to see which strategies match.");
+  };
+
 
   // Text phrases that mean the item is already submitted — these get skipped.
   const SUBMITTED_PHRASES = [
