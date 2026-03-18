@@ -219,6 +219,55 @@
     return acronym || "GEN";
   }
 
+  function getCleanModuleName(fullCourseName) {
+    if (!fullCourseName) return "General";
+
+    let clean = String(fullCourseName).trim();
+
+    clean = clean.replace(/^\s*[A-Za-z]{2,}\d+[A-Za-z0-9]*\s*-\s*/, "");
+    clean = clean.replace(/\s*\[[^\]]*\]\s*$/, "");
+    clean = clean.trim();
+
+    return clean || "General";
+  }
+
+  function getCachedModuleData(url) {
+    if (!url) {
+      return {
+        moduleAcronym: "",
+        cleanModuleName: "",
+      };
+    }
+
+    const cached = acronymCache[url];
+    if (!cached) {
+      return {
+        moduleAcronym: "",
+        cleanModuleName: "",
+      };
+    }
+
+    if (typeof cached === "string") {
+      return {
+        moduleAcronym: cached,
+        cleanModuleName: "",
+      };
+    }
+
+    return {
+      moduleAcronym: cached.moduleAcronym || "",
+      cleanModuleName: cached.cleanModuleName || "",
+    };
+  }
+
+  function setCachedModuleData(url, moduleAcronym, cleanModuleName) {
+    if (!url) return;
+    acronymCache[url] = {
+      moduleAcronym: moduleAcronym || "GEN",
+      cleanModuleName: cleanModuleName || "General",
+    };
+  }
+
   function normalizeCampusValue(campusValue) {
     const upper = String(campusValue || "ALL").toUpperCase().trim();
     if (upper === "KANDY UNI") return "KANDY";
@@ -384,12 +433,15 @@
       if (!taskName || !dueDate || !parsedDate || parsedDate <= now) return null;
 
       const fallbackTitle = extractCourseNameFromEvent(event);
-      const cachedAcronym = url ? acronymCache[url] : "";
-      const moduleAcronym = cachedAcronym || generateAcronym(fallbackTitle);
+      const fallbackCleanModuleName = getCleanModuleName(fallbackTitle);
+      const cachedData = getCachedModuleData(url);
+      const moduleAcronym = cachedData.moduleAcronym || generateAcronym(fallbackTitle);
+      const cleanModuleName = cachedData.cleanModuleName || fallbackCleanModuleName;
       const moduleTitle = fallbackTitle;
 
       const details = {
         moduleAcronym: moduleAcronym,
+        cleanModuleName: cleanModuleName,
         moduleTitle: moduleTitle,
         resolvedUrl: url,
       };
@@ -403,6 +455,7 @@
         dueDate: dueDate,
         url: details.resolvedUrl || url,
         moduleAcronym: details.moduleAcronym,
+        cleanModuleName: details.cleanModuleName,
         moduleTitle: details.moduleTitle,
       };
     });
@@ -423,6 +476,7 @@
       return {
         moduleTitle: fallbackTitle || "",
         moduleAcronym: generateAcronym(fallbackTitle),
+        cleanModuleName: getCleanModuleName(fallbackTitle),
         resolvedUrl: url,
       };
     }
@@ -433,6 +487,7 @@
         return {
           moduleTitle: fallbackTitle || "",
           moduleAcronym: generateAcronym(fallbackTitle),
+          cleanModuleName: getCleanModuleName(fallbackTitle),
           resolvedUrl: url,
         };
       }
@@ -462,12 +517,14 @@
       return {
         moduleTitle: fullCourseName,
         moduleAcronym: generateAcronym(fullCourseName),
+        cleanModuleName: getCleanModuleName(fullCourseName),
         resolvedUrl: resolvedUrl,
       };
     } catch (_error) {
       return {
         moduleTitle: fallbackTitle || "",
         moduleAcronym: generateAcronym(fallbackTitle),
+        cleanModuleName: getCleanModuleName(fallbackTitle),
         resolvedUrl: url,
       };
     }
@@ -486,6 +543,18 @@
 
     document.querySelectorAll('.cwa-module-acronym-badge[data-acronym-url="' + safe + '"]').forEach(function (node) {
       node.textContent = acronym;
+    });
+  }
+
+  function updateModuleNameText(url, cleanModuleName) {
+    if (!url || !cleanModuleName) return;
+
+    const safe = getSafeUrlSelector(url);
+    if (!safe) return;
+
+    document.querySelectorAll('.cwa-module-name-line[data-module-url="' + safe + '"]').forEach(function (node) {
+      node.textContent = cleanModuleName;
+      node.setAttribute("title", cleanModuleName);
     });
   }
 
@@ -513,9 +582,17 @@
     document.querySelectorAll('.cwa-module-acronym-badge[data-acronym-url="' + safeOld + '"]').forEach(function (badge) {
       badge.setAttribute("data-acronym-url", newUrl);
     });
+
+    document.querySelectorAll('.cwa-module-name-line[data-module-url="' + safeOld + '"]').forEach(function (line) {
+      line.setAttribute("data-module-url", newUrl);
+    });
+
+    document.querySelectorAll('[data-module-url="' + safeOld + '"]').forEach(function (node) {
+      node.setAttribute("data-module-url", newUrl);
+    });
   }
 
-  function applyAcronymToState(url, acronym, moduleTitle) {
+  function applyAcronymToState(url, acronym, moduleTitle, cleanModuleName) {
     if (!url || !acronym) return;
 
     currentDeadlines = (currentDeadlines || []).map(function (item) {
@@ -523,6 +600,7 @@
       return Object.assign({}, item, {
         moduleAcronym: acronym,
         moduleTitle: moduleTitle || item.moduleTitle || "",
+        cleanModuleName: cleanModuleName || item.cleanModuleName || getCleanModuleName(moduleTitle || item.moduleTitle || ""),
       });
     });
 
@@ -534,7 +612,9 @@
     for (let i = 0; i < queue.length; i += 1) {
       const item = queue[i];
       if (!item || !item.url) continue;
-      if (acronymCache[item.url]) continue;
+      const cachedData = getCachedModuleData(item.url);
+      const hasFullCachedModuleData = !!(cachedData.moduleAcronym && cachedData.cleanModuleName);
+      if (hasFullCachedModuleData) continue;
       if (pendingAcronymFetches.has(item.url)) continue;
 
       pendingAcronymFetches.add(item.url);
@@ -543,11 +623,12 @@
         .then(function (details) {
           const resolvedUrl = details.resolvedUrl || item.url;
           const exactAcronym = details.moduleAcronym || generateAcronym(item.moduleTitle || "");
+          const cleanModuleName = details.cleanModuleName || getCleanModuleName(details.moduleTitle || item.moduleTitle || "");
           const hasDirectUrl = resolvedUrl && resolvedUrl !== item.url;
 
-          acronymCache[item.url] = exactAcronym;
+          setCachedModuleData(item.url, exactAcronym, cleanModuleName);
           if (hasDirectUrl) {
-            acronymCache[resolvedUrl] = exactAcronym;
+            setCachedModuleData(resolvedUrl, exactAcronym, cleanModuleName);
             updateDeadlinesWithResolvedUrl(item.url, resolvedUrl);
 
             // Live DOM update: ensure open dropdown links navigate directly to activity pages.
@@ -564,7 +645,10 @@
 
             currentDeadlines = (currentDeadlines || []).map(function (deadline) {
               if (!deadline || deadline.url !== item.url) return deadline;
-              return Object.assign({}, deadline, { url: resolvedUrl });
+              return Object.assign({}, deadline, {
+                url: resolvedUrl,
+                cleanModuleName: cleanModuleName,
+              });
             });
             saveDeadlines(currentDeadlines);
 
@@ -572,7 +656,10 @@
               const list = Array.isArray(saved) ? saved : [];
               const updated = list.map(function (deadline) {
                 if (!deadline || deadline.url !== item.url) return deadline;
-                return Object.assign({}, deadline, { url: resolvedUrl });
+                return Object.assign({}, deadline, {
+                  url: resolvedUrl,
+                  cleanModuleName: cleanModuleName,
+                });
               });
               saveDeadlines(updated);
             });
@@ -581,17 +668,20 @@
           queueAcronymCachePersist();
 
           updateBadgeAcronym(item.url, exactAcronym);
+          updateModuleNameText(item.url, cleanModuleName);
           if (hasDirectUrl) {
             updateBadgeAcronym(resolvedUrl, exactAcronym);
+            updateModuleNameText(resolvedUrl, cleanModuleName);
           }
 
-          applyAcronymToState(item.url, exactAcronym, details.moduleTitle);
+          applyAcronymToState(item.url, exactAcronym, details.moduleTitle, cleanModuleName);
           if (hasDirectUrl) {
-            applyAcronymToState(resolvedUrl, exactAcronym, details.moduleTitle);
+            applyAcronymToState(resolvedUrl, exactAcronym, details.moduleTitle, cleanModuleName);
           }
 
           moduleNameCache[item.url] = {
             moduleAcronym: exactAcronym,
+            cleanModuleName: cleanModuleName,
             moduleTitle: details.moduleTitle || item.moduleTitle || "",
             resolvedUrl: resolvedUrl,
           };
@@ -684,6 +774,28 @@
     nameRow.appendChild(badge);
     nameRow.appendChild(title);
 
+    const moduleRow = document.createElement("div");
+    moduleRow.className = "text-muted mt-1";
+    moduleRow.style.cssText = "font-size: 0.8em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;";
+    if (item.url) {
+      moduleRow.setAttribute("data-module-url", item.url);
+    }
+    moduleRow.title = item.cleanModuleName || getCleanModuleName(item.moduleTitle || "");
+
+    const moduleIcon = document.createElement("i");
+    moduleIcon.className = "fa fa-book me-1";
+    moduleIcon.setAttribute("aria-hidden", "true");
+
+    const moduleText = document.createElement("span");
+    moduleText.className = "cwa-module-name-line";
+    if (item.url) {
+      moduleText.setAttribute("data-module-url", item.url);
+    }
+    moduleText.textContent = item.cleanModuleName || getCleanModuleName(item.moduleTitle || "");
+
+    moduleRow.appendChild(moduleIcon);
+    moduleRow.appendChild(moduleText);
+
     const dueRow = document.createElement("div");
     dueRow.className = "d-flex align-items-center mb-2";
 
@@ -751,6 +863,7 @@
     progressWrap.appendChild(bar);
 
     card.appendChild(nameRow);
+    card.appendChild(moduleRow);
     card.appendChild(dueRow);
     card.appendChild(countdownRow);
     card.appendChild(progressWrap);
@@ -1072,6 +1185,7 @@
     const url = item.url || "";
     const moduleTitle = item.moduleTitle || item.moduleName || "";
     const moduleAcronym = item.moduleAcronym || generateAcronym(moduleTitle);
+    const cleanModuleName = item.cleanModuleName || getCleanModuleName(moduleTitle);
 
     const parsed = parseDeadlineDate(dueDate);
     if (!taskName || !dueDate || !parsed || parsed <= new Date()) return null;
@@ -1081,6 +1195,7 @@
       dueDate: dueDate,
       url: url,
       moduleAcronym: moduleAcronym,
+      cleanModuleName: cleanModuleName,
       moduleTitle: moduleTitle,
     };
   }
