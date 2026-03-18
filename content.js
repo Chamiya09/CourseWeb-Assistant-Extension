@@ -628,6 +628,39 @@
     });
   }
 
+  function updateNotificationBadge(deadlines) {
+    const toggle = document.querySelector("#cwa-deadlines-menu .nav-link.dropdown-toggle");
+    if (!toggle) return;
+
+    const nowMs = Date.now();
+    const urgentWindowMs = 2 * 24 * 60 * 60 * 1000; // 48 hours
+
+    const urgentCount = (deadlines || []).reduce(function (count, item) {
+      const parsed = parseDeadlineDate(item.dueDate);
+      if (!parsed) return count;
+
+      const msLeft = parsed.getTime() - nowMs;
+      const isOverdue = msLeft < 0;
+      const isUrgent = msLeft >= 0 && msLeft <= urgentWindowMs;
+
+      return isOverdue || isUrgent ? count + 1 : count;
+    }, 0);
+
+    let badge = toggle.querySelector("#cwa-nav-urgent-badge");
+
+    if (urgentCount > 0) {
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.id = "cwa-nav-urgent-badge";
+        badge.className = "badge bg-danger rounded-pill ms-2";
+        toggle.appendChild(badge);
+      }
+      badge.textContent = String(urgentCount);
+    } else if (badge) {
+      badge.remove();
+    }
+  }
+
   function startCountdownTicker() {
     if (countdownInterval) clearInterval(countdownInterval);
 
@@ -803,6 +836,7 @@
     }
 
     startCountdownTicker();
+    updateNotificationBadge(deadlines);
   }
 
   function normalizeStoredItem(item) {
