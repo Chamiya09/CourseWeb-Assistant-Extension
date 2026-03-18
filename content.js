@@ -543,22 +543,50 @@
         .then(function (details) {
           const resolvedUrl = details.resolvedUrl || item.url;
           const exactAcronym = details.moduleAcronym || generateAcronym(item.moduleTitle || "");
+          const hasDirectUrl = resolvedUrl && resolvedUrl !== item.url;
 
           acronymCache[item.url] = exactAcronym;
-          if (resolvedUrl && resolvedUrl !== item.url) {
+          if (hasDirectUrl) {
             acronymCache[resolvedUrl] = exactAcronym;
             updateDeadlinesWithResolvedUrl(item.url, resolvedUrl);
+
+            // Live DOM update: ensure open dropdown links navigate directly to activity pages.
+            document.querySelectorAll('#cwa-deadlines-menu a.list-group-item-action[href="' + getSafeUrlSelector(item.url) + '"]').forEach(function (anchor) {
+              anchor.setAttribute("href", resolvedUrl);
+            });
+
+            document.querySelectorAll('.cwa-module-acronym-badge[data-acronym-url="' + getSafeUrlSelector(item.url) + '"]').forEach(function (badge) {
+              const anchor = badge.closest("a.list-group-item-action");
+              if (anchor) {
+                anchor.setAttribute("href", resolvedUrl);
+              }
+            });
+
+            currentDeadlines = (currentDeadlines || []).map(function (deadline) {
+              if (!deadline || deadline.url !== item.url) return deadline;
+              return Object.assign({}, deadline, { url: resolvedUrl });
+            });
+            saveDeadlines(currentDeadlines);
+
+            loadDeadlines(function (saved) {
+              const list = Array.isArray(saved) ? saved : [];
+              const updated = list.map(function (deadline) {
+                if (!deadline || deadline.url !== item.url) return deadline;
+                return Object.assign({}, deadline, { url: resolvedUrl });
+              });
+              saveDeadlines(updated);
+            });
           }
 
           queueAcronymCachePersist();
 
           updateBadgeAcronym(item.url, exactAcronym);
-          if (resolvedUrl && resolvedUrl !== item.url) {
+          if (hasDirectUrl) {
             updateBadgeAcronym(resolvedUrl, exactAcronym);
           }
 
           applyAcronymToState(item.url, exactAcronym, details.moduleTitle);
-          if (resolvedUrl && resolvedUrl !== item.url) {
+          if (hasDirectUrl) {
             applyAcronymToState(resolvedUrl, exactAcronym, details.moduleTitle);
           }
 
@@ -568,7 +596,7 @@
             resolvedUrl: resolvedUrl,
           };
 
-          if (resolvedUrl && resolvedUrl !== item.url) {
+          if (hasDirectUrl) {
             moduleNameCache[resolvedUrl] = moduleNameCache[item.url];
           }
         })
