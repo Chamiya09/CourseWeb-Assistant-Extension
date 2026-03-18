@@ -608,6 +608,27 @@
   }
 
   async function updateMissingAcronymsInBackground(items) {
+    async function resolveUniversalDirectUrl(candidateUrl) {
+      if (!candidateUrl) return "";
+      try {
+        const response = await fetch(candidateUrl, { credentials: "include" });
+        if (!response.ok) return "";
+
+        const html = await response.text();
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const directLinkNode = doc.querySelector('a[href*="/mod/"][href*="view.php"]');
+        if (!directLinkNode || !directLinkNode.getAttribute("href")) return "";
+
+        try {
+          return new URL(directLinkNode.getAttribute("href"), window.location.origin).href;
+        } catch (_e) {
+          return directLinkNode.getAttribute("href") || "";
+        }
+      } catch (_error) {
+        return "";
+      }
+    }
+
     const queue = Array.isArray(items) ? items : [];
     for (let i = 0; i < queue.length; i += 1) {
       const item = queue[i];
@@ -620,8 +641,15 @@
       pendingAcronymFetches.add(item.url);
 
       fetchExactModuleDetails(item.url, item.moduleTitle || "")
-        .then(function (details) {
-          const resolvedUrl = details.resolvedUrl || item.url;
+        .then(async function (details) {
+          let resolvedUrl = details.resolvedUrl || item.url;
+          if (resolvedUrl === item.url) {
+            const universalDirectUrl = await resolveUniversalDirectUrl(item.url);
+            if (universalDirectUrl) {
+              resolvedUrl = universalDirectUrl;
+            }
+          }
+
           const exactAcronym = details.moduleAcronym || generateAcronym(item.moduleTitle || "");
           const cleanModuleName = details.cleanModuleName || getCleanModuleName(details.moduleTitle || item.moduleTitle || "");
           const hasDirectUrl = resolvedUrl && resolvedUrl !== item.url;
