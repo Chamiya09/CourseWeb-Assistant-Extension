@@ -234,38 +234,10 @@
         const html = await response.text();
         const doc = new DOMParser().parseFromString(html, "text/html");
 
-        let moduleString = "";
-        const breadcrumbLinks = doc.querySelectorAll("ol.breadcrumb a[title], .breadcrumb a[title], ol.breadcrumb a, .breadcrumb a");
+        const courseLink = doc.querySelector('.breadcrumb a[href*="/course/view.php?id="]');
+        const fullCourseName = courseLink ? courseLink.textContent.trim() : "";
 
-        for (let i = 0; i < breadcrumbLinks.length; i += 1) {
-          const link = breadcrumbLinks[i];
-          const candidate = (link.getAttribute("title") || link.textContent || "").trim();
-          if (!candidate) continue;
-
-          const hasCourseCode = /[A-Za-z]{2,}\d{3,}/.test(candidate);
-          const hasCourseSeparator = candidate.indexOf(" - ") !== -1;
-          if (hasCourseCode || hasCourseSeparator) {
-            moduleString = candidate;
-            break;
-          }
-        }
-
-        if (!moduleString) {
-          const breadcrumbItems = doc.querySelectorAll("ol.breadcrumb li, .breadcrumb li");
-          for (let i = 0; i < breadcrumbItems.length; i += 1) {
-            const candidate = (breadcrumbItems[i].textContent || "").trim().replace(/\s+/g, " ");
-            if (!candidate) continue;
-
-            const hasCourseCode = /[A-Za-z]{2,}\d{3,}/.test(candidate);
-            const hasCourseSeparator = candidate.indexOf(" - ") !== -1;
-            if (hasCourseCode || hasCourseSeparator) {
-              moduleString = candidate;
-              break;
-            }
-          }
-        }
-
-        const acronym = generateAcronym(moduleString);
+        const acronym = generateAcronym(fullCourseName);
         moduleNameCache[url] = acronym;
         return acronym;
       } catch (_error) {
@@ -389,29 +361,31 @@
     return lower;
   }
 
-  function generateAcronym(moduleName) {
-    if (!moduleName) return "GEN";
+  function generateAcronym(fullCourseName) {
+    if (!fullCourseName) return "GEN";
 
-    const stopWords = ["and", "of", "the", "for", "in"];
-    const raw = String(moduleName);
+    const stopWords = ["and", "of", "the", "for", "in", "to", "a", "&"];
+    const raw = String(fullCourseName).trim();
 
-    const hyphenIndex = raw.indexOf("-");
-    const bracketIndex = raw.indexOf("[");
+    // Primary extraction: text between first hyphen and opening bracket.
+    const match = raw.match(/-\s*(.+?)\s*\[/);
 
-    // Extract text between first hyphen and opening bracket.
-    let coreName = raw;
-    if (hyphenIndex !== -1) {
-      const start = hyphenIndex + 1;
-      const end = bracketIndex !== -1 && bracketIndex > start ? bracketIndex : raw.length;
-      coreName = raw.slice(start, end);
-    } else if (bracketIndex !== -1) {
-      coreName = raw.slice(0, bracketIndex);
+    let coreName = "";
+    if (match && match[1]) {
+      coreName = match[1].trim();
+    } else {
+      // Fallback: split by '-' and use second segment if available.
+      const parts = raw.split("-");
+      coreName = parts.length > 1 ? parts.slice(1).join("-").trim() : raw;
     }
 
-    const cleaned = coreName.trim();
+    if (!coreName) return "GEN";
 
-    const words = cleaned
-      .split(/[^A-Za-z0-9]+/)
+    const words = coreName
+      .split(/\s+/)
+      .map(function (word) {
+        return word.replace(/[^A-Za-z0-9&]/g, "").trim();
+      })
       .filter(function (word) {
         return word && stopWords.indexOf(word.toLowerCase()) === -1;
       });
@@ -422,8 +396,7 @@
       .map(function (word) {
         return word.charAt(0).toUpperCase();
       })
-      .join("")
-      .slice(0, 5);
+      .join("");
   }
 
   function filterByCampus(deadlines, campusLabel) {
@@ -669,12 +642,20 @@
       document.querySelectorAll(".cwa-bar[data-target]").forEach(function (bar) {
         const target = new Date(bar.dataset.target);
         const msLeft = target.getTime() - now;
+        const daysLeft = msLeft / (1000 * 60 * 60 * 24);
+
+        let urgencyClass = "bg-danger";
+        if (daysLeft > 4) {
+          urgencyClass = "bg-success";
+        } else if (daysLeft >= 1 && daysLeft <= 4) {
+          urgencyClass = "bg-warning";
+        }
 
         bar.style.width = progressPercent(target) + "%";
         ["bg-danger", "bg-warning", "bg-success", "bg-secondary"].forEach(function (cls) {
           bar.classList.remove(cls);
         });
-        bar.classList.add(progressBarClass(msLeft));
+        bar.classList.add(urgencyClass);
       });
     }, 1000);
   }
