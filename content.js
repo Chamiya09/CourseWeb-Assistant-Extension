@@ -1,6 +1,6 @@
 // ============================================================
-// CourseWeb Assistant - content.js  v6.0
-// Upcoming-only deadlines with campus filtering.
+// CourseWeb Assistant - content.js  v8.0
+// Upcoming-only deadlines with inline persistent settings.
 // ============================================================
 
 (function () {
@@ -9,20 +9,32 @@
   const NAVBAR_SELECTOR = ".navbar-nav";
   const DEADLINE_WINDOW_DAYS = 7;
   const STORAGE_KEY = "cwa_deadlines";
-  const CAMPUS_STORAGE_KEY = "selectedCampus";
-  const DEFAULT_CAMPUS = "All Centers (Show All)";
+  const SETTINGS_STORAGE_KEY = "cwa_user_settings";
+
   const CAMPUS_OPTIONS = [
-    "All Centers (Show All)",
-    "Malabe",
-    "Northern Uni",
-    "Kandy Uni",
-    "Matara Center",
-    "Prorata",
+    { value: "ALL", label: "All Centers" },
+    { value: "MALABE", label: "Malabe" },
+    { value: "KANDY", label: "Kandy Uni" },
+    { value: "NORTHERN", label: "Northern Uni" },
+    { value: "MATARA", label: "Matara Center" },
+    { value: "PRORATA", label: "Prorata" },
   ];
 
+  const BATCH_OPTIONS = [
+    { value: "ALL", label: "All" },
+    { value: "WEEKDAY", label: "Weekday" },
+    { value: "WEEKEND", label: "Weekend" },
+  ];
+
+  const SEMESTER_OPTIONS = ["ALL", "2026/JAN", "2026/JUN", "2025/JAN", "2025/JUN"];
+  const CAMPUS_MODIFIERS = ["MALABE", "KANDY", "MATARA", "NORTHERN", "PRORATA", "ALL CENTERS"];
+
   const moduleNameCache = {};
+
   let countdownInterval = null;
-  let selectedCampus = DEFAULT_CAMPUS;
+  let currentDeadlines = [];
+  let currentListHost = null;
+  let userSettings = { campus: "ALL", batch: "ALL", semester: "ALL" };
 
   function injectStyles() {
     if (document.getElementById("cwa-styles")) return;
@@ -30,22 +42,74 @@
     const style = document.createElement("style");
     style.id = "cwa-styles";
     style.textContent = [
-      ".cwa-campus-select-wrap {",
-      "  margin-top: 8px;",
+      ".cwa-header-block {",
+      "  position: relative;",
+      "  padding: 8px 40px 10px 16px;",
+      "  border-bottom: 1px solid #e9ecef;",
       "}",
-      ".cwa-campus-select {",
-      "  border-radius: 12px;",
-      "  font-size: 0.76rem;",
+      ".cwa-settings-gear {",
+      "  position: absolute;",
+      "  top: 8px;",
+      "  right: 10px;",
+      "  border: 0;",
+      "  background: transparent;",
+      "  color: #64748b;",
+      "  font-size: .95rem;",
+      "  line-height: 1;",
+      "  padding: 4px;",
+      "  transition: color .15s ease, transform .15s ease;",
+      "}",
+      ".cwa-settings-gear:hover {",
+      "  color: #0d6efd;",
+      "  transform: rotate(20deg);",
+      "}",
+      ".cwa-inline-settings-panel {",
+      "  display: none;",
+      "  padding: 12px 16px;",
+      "  border-bottom: 1px solid #e9ecef;",
+      "  background: linear-gradient(180deg, #f8fbff 0%, #ffffff 100%);",
+      "}",
+      ".cwa-inline-settings-panel.is-open {",
+      "  display: block;",
+      "}",
+      ".cwa-inline-settings-title {",
+      "  font-size: .78rem;",
+      "  font-weight: 700;",
+      "  text-transform: uppercase;",
+      "  letter-spacing: .06em;",
+      "  color: #475569;",
+      "  margin-bottom: 10px;",
+      "}",
+      ".cwa-inline-field {",
+      "  margin-bottom: 10px;",
+      "}",
+      ".cwa-inline-field label {",
+      "  display: block;",
+      "  font-size: .75rem;",
+      "  font-weight: 700;",
+      "  color: #64748b;",
+      "  margin-bottom: 5px;",
+      "}",
+      ".cwa-inline-field select {",
+      "  width: 100%;",
+      "  border-radius: 10px;",
+      "  border: 1px solid rgba(15, 23, 42, .16);",
+      "  padding: 8px 10px;",
+      "  font-size: .85rem;",
       "  font-weight: 600;",
-      "  border: 1px solid rgba(15, 23, 42, 0.12);",
-      "  background-color: rgba(255, 255, 255, 0.92);",
-      "  color: #334155;",
-      "  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);",
-      "  transition: border-color 180ms ease, box-shadow 180ms ease;",
+      "  color: #1e293b;",
+      "  background: #ffffff;",
       "}",
-      ".cwa-campus-select:focus {",
-      "  border-color: rgba(13, 110, 253, 0.55);",
-      "  box-shadow: 0 0 0 0.15rem rgba(13, 110, 253, 0.15);",
+      ".cwa-inline-actions {",
+      "  display: flex;",
+      "  justify-content: flex-end;",
+      "  gap: 8px;",
+      "  margin-top: 4px;",
+      "}",
+      ".cwa-settings-summary {",
+      "  font-size: .74rem;",
+      "  color: #64748b;",
+      "  margin-top: 4px;",
       "}",
     ].join("\n");
 
@@ -155,6 +219,42 @@
     }).join("");
   }
 
+  function normalizeCampusValue(campusValue) {
+    const upper = String(campusValue || "ALL").toUpperCase().trim();
+    if (upper === "KANDY UNI") return "KANDY";
+    if (upper === "NORTHERN UNI") return "NORTHERN";
+    if (upper === "MATARA CENTER") return "MATARA";
+    if (upper === "ALL CENTERS") return "ALL";
+    return upper;
+  }
+
+  function normalizeBatchValue(batchValue) {
+    const upper = String(batchValue || "ALL").toUpperCase().trim();
+    if (upper !== "WEEKDAY" && upper !== "WEEKEND") return "ALL";
+    return upper;
+  }
+
+  function normalizeSemesterValue(semesterValue) {
+    const upper = String(semesterValue || "ALL").toUpperCase().trim();
+    if (SEMESTER_OPTIONS.indexOf(upper) === -1) return "ALL";
+    return upper;
+  }
+
+  function saveUserSettings(settings) {
+    chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: settings });
+  }
+
+  function loadUserSettings(callback) {
+    chrome.storage.local.get([SETTINGS_STORAGE_KEY], function (result) {
+      const stored = result[SETTINGS_STORAGE_KEY] || {};
+      callback({
+        campus: normalizeCampusValue(stored.campus || "ALL"),
+        batch: normalizeBatchValue(stored.batch || "ALL"),
+        semester: normalizeSemesterValue(stored.semester || "ALL"),
+      });
+    });
+  }
+
   function extractCampusScope(taskName) {
     const rawTitle = String(taskName || "");
     const parenthesized = [];
@@ -168,34 +268,50 @@
     return parenthesized.concat(uppercaseChunks).join(" ").toUpperCase().trim();
   }
 
-  function normalizeSelectedCampus(campusLabel) {
-    if (!campusLabel || campusLabel === DEFAULT_CAMPUS) return "ALL";
-    const lower = campusLabel.toLowerCase();
-    if (lower.indexOf("malabe") !== -1) return "MALABE";
-    if (lower.indexOf("northern") !== -1) return "NORTHERN";
-    if (lower.indexOf("kandy") !== -1) return "KANDY";
-    if (lower.indexOf("matara") !== -1) return "MATARA";
-    if (lower.indexOf("prorata") !== -1 || lower.indexOf("pro rata") !== -1) return "PRORATA";
-    return String(campusLabel).toUpperCase().trim();
+  function passSemesterFilter(item, settings) {
+    const selectedSemester = normalizeSemesterValue(settings.semester);
+    if (selectedSemester === "ALL") return true;
+
+    const moduleTitleUpper = String(item.moduleTitle || "").toUpperCase();
+    const semesterToken = "[" + selectedSemester + "]";
+    return moduleTitleUpper.indexOf(semesterToken) !== -1;
   }
 
-  function filterByCampus(deadlines, campusLabel) {
-    const allModifiers = ["MALABE", "KANDY", "MATARA", "NORTHERN", "PRORATA", "ALL CENTERS"];
-    const selectedUpper = normalizeSelectedCampus(campusLabel);
+  function passBatchFilter(taskName, settings) {
+    const titleUpper = String(taskName || "").toUpperCase();
+    const batch = normalizeBatchValue(settings.batch);
 
-    return deadlines.filter(function (item) {
-      const scope = extractCampusScope(item.taskName);
+    if (batch === "WEEKDAY" && titleUpper.indexOf("WEEKEND") !== -1) return false;
+    if (batch === "WEEKEND" && titleUpper.indexOf("WEEKDAY") !== -1) return false;
+    return true;
+  }
 
-      if (campusLabel === DEFAULT_CAMPUS || selectedUpper === "ALL") return true;
-      if (!scope) return true;
-      if (scope.includes(selectedUpper)) return true;
+  function passCampusFilter(taskName, settings) {
+    const selectedCampus = normalizeCampusValue(settings.campus);
+    if (selectedCampus === "ALL") return true;
 
-      for (let i = 0; i < allModifiers.length; i += 1) {
-        const modifier = allModifiers[i];
-        if (!scope.includes(modifier)) continue;
-        if (modifier !== selectedUpper) return false;
-      }
+    const scope = extractCampusScope(taskName);
+    if (!scope) return true;
 
+    const hasCampusModifier = CAMPUS_MODIFIERS.some(function (modifier) {
+      return scope.indexOf(modifier) !== -1;
+    });
+
+    if (!hasCampusModifier) return true;
+    if (scope.indexOf(selectedCampus) !== -1) return true;
+
+    for (let i = 0; i < CAMPUS_MODIFIERS.length; i += 1) {
+      if (scope.indexOf(CAMPUS_MODIFIERS[i]) !== -1) return false;
+    }
+
+    return true;
+  }
+
+  function applyUserFilters(deadlines, settings) {
+    return (deadlines || []).filter(function (item) {
+      if (!passSemesterFilter(item, settings)) return false;
+      if (!passBatchFilter(item.taskName, settings)) return false;
+      if (!passCampusFilter(item.taskName, settings)) return false;
       return true;
     });
   }
@@ -206,29 +322,32 @@
 
     const eventItems = document.querySelectorAll('.event[data-eventtype-course="1"]');
 
-    async function resolveModuleAcronym(url) {
-      if (!url) return "GEN";
+    async function resolveModuleDetails(url) {
+      if (!url) return { moduleAcronym: "GEN", moduleTitle: "" };
       if (moduleNameCache[url]) return moduleNameCache[url];
 
       try {
         const response = await fetch(url, { credentials: "include" });
         if (!response.ok) {
-          moduleNameCache[url] = "GEN";
-          return "GEN";
+          moduleNameCache[url] = { moduleAcronym: "GEN", moduleTitle: "" };
+          return moduleNameCache[url];
         }
 
         const html = await response.text();
         const doc = new DOMParser().parseFromString(html, "text/html");
 
         const courseLink = doc.querySelector('.breadcrumb a[href*="/course/view.php?id="]');
-        const fullCourseName = courseLink ? courseLink.textContent.trim() : "";
-        const acronym = generateAcronym(fullCourseName);
+        const moduleTitle = courseLink ? courseLink.textContent.trim() : "";
 
-        moduleNameCache[url] = acronym;
-        return acronym;
+        moduleNameCache[url] = {
+          moduleAcronym: generateAcronym(moduleTitle),
+          moduleTitle: moduleTitle,
+        };
+
+        return moduleNameCache[url];
       } catch (_error) {
-        moduleNameCache[url] = "GEN";
-        return "GEN";
+        moduleNameCache[url] = { moduleAcronym: "GEN", moduleTitle: "" };
+        return moduleNameCache[url];
       }
     }
 
@@ -260,16 +379,16 @@
         }
       }
 
-      // Future-only persistence: drop overdue/past items at scrape level.
       if (!taskName || !dueDate || !parsedDate || parsedDate <= now) return null;
 
-      const moduleAcronym = await resolveModuleAcronym(url);
+      const details = await resolveModuleDetails(url);
 
       return {
         taskName: taskName,
         dueDate: dueDate,
         url: url,
-        moduleAcronym: moduleAcronym,
+        moduleAcronym: details.moduleAcronym,
+        moduleTitle: details.moduleTitle,
       };
     }));
 
@@ -291,21 +410,6 @@
   function loadDeadlines(callback) {
     chrome.storage.local.get([STORAGE_KEY], function (result) {
       callback(result[STORAGE_KEY] || []);
-    });
-  }
-
-  function saveSelectedCampus(campusValue) {
-    chrome.storage.local.set({ [CAMPUS_STORAGE_KEY]: campusValue });
-  }
-
-  function loadSelectedCampus(callback) {
-    chrome.storage.local.get([CAMPUS_STORAGE_KEY], function (result) {
-      const stored = result[CAMPUS_STORAGE_KEY];
-      if (!stored || CAMPUS_OPTIONS.indexOf(stored) === -1) {
-        callback(DEFAULT_CAMPUS);
-        return;
-      }
-      callback(stored);
     });
   }
 
@@ -446,7 +550,7 @@
     }
 
     const now = new Date();
-    const campusFiltered = filterByCampus(deadlines || [], selectedCampus)
+    const filteredDeadlines = applyUserFilters(deadlines || [], userSettings)
       .filter(function (item) {
         const parsed = parseDeadlineDate(item.dueDate);
         return parsed && parsed > now;
@@ -455,18 +559,18 @@
         return parseDeadlineDate(a.dueDate) - parseDeadlineDate(b.dueDate);
       });
 
-    if (campusFiltered.length === 0) {
+    if (filteredDeadlines.length === 0) {
       const empty = document.createElement("li");
       empty.innerHTML =
         '<div style="padding:14px 16px; text-align:center; color:#6c757d; font-size:.87rem; font-style:italic;">'
         + '<i class="fa fa-inbox" aria-hidden="true" style="margin-right:6px;"></i>'
-        + "No upcoming deadlines."
+        + "No upcoming deadlines for the selected settings."
         + "</div>";
       listRoot.appendChild(empty);
       return;
     }
 
-    campusFiltered.forEach(function (item) {
+    filteredDeadlines.forEach(function (item) {
       listRoot.appendChild(createDeadlineCard(item));
     });
   }
@@ -476,9 +580,10 @@
     if (!toggle) return;
 
     const nowMs = Date.now();
-    const urgentWindowMs = 2 * 24 * 60 * 60 * 1000; // 48 hours
+    const urgentWindowMs = 2 * 24 * 60 * 60 * 1000;
+    const filtered = applyUserFilters(deadlines || [], userSettings);
 
-    const urgentCount = (deadlines || []).reduce(function (count, item) {
+    const urgentCount = filtered.reduce(function (count, item) {
       const parsed = parseDeadlineDate(item.dueDate);
       if (!parsed) return count;
 
@@ -538,6 +643,8 @@
     const navItem = document.createElement("li");
     navItem.className = "nav-item dropdown";
     navItem.id = "cwa-deadlines-menu";
+    navItem.setAttribute("data-bs-auto-close", "outside");
+    navItem.setAttribute("data-auto-close", "outside");
 
     const toggle = document.createElement("a");
     toggle.className = "nav-link dropdown-toggle";
@@ -557,24 +664,51 @@
       "background: #ffffff",
       "border: 1px solid rgba(0,0,0,.1)",
       "border-radius: 8px",
-      "padding: 6px 0",
+      "padding: 0",
+      "overflow: hidden",
     ].join("; ");
 
     const header = document.createElement("li");
     header.innerHTML =
-      '<div style="padding:8px 16px 6px; border-bottom:1px solid #e9ecef;">'
-      + '<div style="font-size:.75rem; font-weight:700; letter-spacing:.07em; color:#6c757d; text-transform:uppercase; margin-bottom:8px;">'
+      '<div class="cwa-header-block">'
+      + '<div style="font-size:.75rem; font-weight:700; letter-spacing:.07em; color:#6c757d; text-transform:uppercase; margin-bottom:4px;">'
       + '<i class="fa fa-calendar" aria-hidden="true" style="margin-right:6px;"></i>Upcoming Deadlines'
       + "</div>"
-      + '<div class="cwa-campus-select-wrap">'
-      + '<select class="form-select form-select-sm cwa-campus-select" id="cwa-campus-select" aria-label="Select center"></select>'
-      + "</div>"
+      + '<div style="font-size:.76rem; color:#6c757d;">Filtered by your saved settings profile.</div>'
+      + '<button type="button" class="cwa-settings-gear" id="cwa-inline-settings-toggle" aria-label="Open settings" title="Settings">'
+      + '<i class="fa fa-cog" aria-hidden="true"></i>'
+      + "</button>"
       + "</div>";
     menu.appendChild(header);
+
+    const settingsPanelLi = document.createElement("li");
+    settingsPanelLi.innerHTML =
+      '<div class="cwa-inline-settings-panel" id="cwa-inline-settings-panel">'
+      + '<div class="cwa-inline-settings-title">Extension Settings</div>'
+      + '<div class="cwa-inline-field">'
+      + '<label for="cwa-settings-campus">Center</label>'
+      + '<select id="cwa-settings-campus"></select>'
+      + "</div>"
+      + '<div class="cwa-inline-field">'
+      + '<label for="cwa-settings-batch">Batch Type</label>'
+      + '<select id="cwa-settings-batch"></select>'
+      + "</div>"
+      + '<div class="cwa-inline-field">'
+      + '<label for="cwa-settings-semester">Intake/Semester</label>'
+      + '<select id="cwa-settings-semester"></select>'
+      + '<div class="cwa-settings-summary" id="cwa-settings-summary"></div>'
+      + "</div>"
+      + '<div class="cwa-inline-actions">'
+      + '<button type="button" class="btn btn-light btn-sm" id="cwa-settings-cancel">Cancel</button>'
+      + '<button type="button" class="btn btn-primary btn-sm" id="cwa-settings-save">Save & Apply</button>'
+      + "</div>"
+      + "</div>";
+    menu.appendChild(settingsPanelLi);
 
     const listHost = document.createElement("div");
     listHost.style.cssText = "max-height: 380px; overflow-y: auto;";
     menu.appendChild(listHost);
+    currentListHost = listHost;
 
     const footerDivider = document.createElement("li");
     footerDivider.innerHTML = '<div style="border-top:1px solid #e9ecef;"></div>';
@@ -600,33 +734,119 @@
     navItem.appendChild(toggle);
     navItem.appendChild(menu);
 
-    const campusSelect = header.querySelector("#cwa-campus-select");
-    CAMPUS_OPTIONS.forEach(function (optionLabel) {
+    const inlinePanel = settingsPanelLi.querySelector("#cwa-inline-settings-panel");
+    const campusSelect = settingsPanelLi.querySelector("#cwa-settings-campus");
+    const batchSelect = settingsPanelLi.querySelector("#cwa-settings-batch");
+    const semesterSelect = settingsPanelLi.querySelector("#cwa-settings-semester");
+    const summary = settingsPanelLi.querySelector("#cwa-settings-summary");
+    const settingsToggle = header.querySelector("#cwa-inline-settings-toggle");
+    const cancelBtn = settingsPanelLi.querySelector("#cwa-settings-cancel");
+    const saveBtn = settingsPanelLi.querySelector("#cwa-settings-save");
+
+    CAMPUS_OPTIONS.forEach(function (optionDef) {
       const option = document.createElement("option");
-      option.value = optionLabel;
-      option.textContent = optionLabel;
+      option.value = optionDef.value;
+      option.textContent = optionDef.label;
       campusSelect.appendChild(option);
     });
-    campusSelect.value = selectedCampus;
 
-    function rerenderList() {
-      renderDeadlines(listHost, deadlines);
-      updateNotificationBadge(deadlines);
-    }
-
-    campusSelect.addEventListener("change", function () {
-      selectedCampus = campusSelect.value || DEFAULT_CAMPUS;
-      saveSelectedCampus(selectedCampus);
-      rerenderList();
+    BATCH_OPTIONS.forEach(function (optionDef) {
+      const option = document.createElement("option");
+      option.value = optionDef.value;
+      option.textContent = optionDef.label;
+      batchSelect.appendChild(option);
     });
 
-    rerenderList();
+    SEMESTER_OPTIONS.forEach(function (semester) {
+      const option = document.createElement("option");
+      option.value = semester;
+      option.textContent = semester;
+      semesterSelect.appendChild(option);
+    });
+
+    function setSettingsOpen(isOpen) {
+      if (isOpen) {
+        inlinePanel.classList.add("is-open");
+        listHost.style.display = "none";
+        footerDivider.style.display = "none";
+        rescanLi.style.display = "none";
+      } else {
+        inlinePanel.classList.remove("is-open");
+        listHost.style.display = "block";
+        footerDivider.style.display = "block";
+        rescanLi.style.display = "block";
+      }
+    }
+
+    function updateSummary() {
+      const campusLabel = (CAMPUS_OPTIONS.find(function (opt) {
+        return opt.value === campusSelect.value;
+      }) || {}).label || "All Centers";
+
+      const batchLabel = (BATCH_OPTIONS.find(function (opt) {
+        return opt.value === batchSelect.value;
+      }) || {}).label || "All";
+
+      summary.textContent = "Profile: " + campusLabel + " / " + batchLabel + " / " + semesterSelect.value;
+    }
+
+    function loadPanelFromSettings() {
+      campusSelect.value = normalizeCampusValue(userSettings.campus);
+      batchSelect.value = normalizeBatchValue(userSettings.batch);
+      semesterSelect.value = normalizeSemesterValue(userSettings.semester);
+      updateSummary();
+    }
+
+    [campusSelect, batchSelect, semesterSelect].forEach(function (selectEl) {
+      selectEl.addEventListener("change", updateSummary);
+      selectEl.addEventListener("click", function (event) {
+        event.stopPropagation();
+      });
+    });
+
+    settingsToggle.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      loadPanelFromSettings();
+      setSettingsOpen(!inlinePanel.classList.contains("is-open"));
+    });
+
+    inlinePanel.addEventListener("click", function (event) {
+      event.stopPropagation();
+    });
+
+    cancelBtn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      setSettingsOpen(false);
+    });
+
+    saveBtn.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+
+      userSettings = {
+        campus: normalizeCampusValue(campusSelect.value),
+        batch: normalizeBatchValue(batchSelect.value),
+        semester: normalizeSemesterValue(semesterSelect.value),
+      };
+
+      saveUserSettings(userSettings);
+      setSettingsOpen(false);
+      renderDeadlines(listHost, currentDeadlines);
+      updateNotificationBadge(currentDeadlines);
+    });
+
+    setSettingsOpen(false);
+    renderDeadlines(listHost, deadlines);
     return navItem;
   }
 
   function renderDropdown(deadlines) {
+    currentDeadlines = deadlines || [];
+
     const existing = document.getElementById("cwa-deadlines-menu");
-    const next = buildDropdown(deadlines);
+    const next = buildDropdown(currentDeadlines);
 
     if (existing) {
       existing.replaceWith(next);
@@ -637,7 +857,7 @@
     }
 
     startCountdownTicker();
-    updateNotificationBadge(deadlines);
+    updateNotificationBadge(currentDeadlines);
   }
 
   function normalizeStoredItem(item) {
@@ -646,7 +866,8 @@
     const taskName = item.taskName || item.label || "";
     const dueDate = item.dueDate || item.due || "";
     const url = item.url || "";
-    const moduleAcronym = item.moduleAcronym || generateAcronym(item.moduleName || "");
+    const moduleTitle = item.moduleTitle || item.moduleName || "";
+    const moduleAcronym = item.moduleAcronym || generateAcronym(moduleTitle);
 
     const parsed = parseDeadlineDate(dueDate);
     if (!taskName || !dueDate || !parsed || parsed <= new Date()) return null;
@@ -656,6 +877,7 @@
       dueDate: dueDate,
       url: url,
       moduleAcronym: moduleAcronym,
+      moduleTitle: moduleTitle,
     };
   }
 
@@ -665,8 +887,8 @@
 
     injectStyles();
 
-    loadSelectedCampus(async function (savedCampus) {
-      selectedCampus = savedCampus || DEFAULT_CAMPUS;
+    loadUserSettings(async function (storedSettings) {
+      userSettings = storedSettings;
 
       const scraped = await scrapeDeadlines();
       saveDeadlines(scraped);
