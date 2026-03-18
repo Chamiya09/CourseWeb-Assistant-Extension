@@ -22,19 +22,16 @@
 
   const BATCH_OPTIONS = [
     { value: "ALL", label: "All" },
-    { value: "WEEKDAY", label: "Weekday" },
-    { value: "WEEKEND", label: "Weekend" },
+    { value: "Weekday", label: "Weekday" },
+    { value: "Weekend", label: "Weekend" },
   ];
-
-  const SEMESTER_OPTIONS = ["ALL", "2026/JAN", "2026/JUN", "2025/JAN", "2025/JUN"];
-  const CAMPUS_MODIFIERS = ["MALABE", "KANDY", "MATARA", "NORTHERN", "PRORATA", "ALL CENTERS"];
 
   const moduleNameCache = {};
 
   let countdownInterval = null;
   let currentDeadlines = [];
   let currentListHost = null;
-  let userSettings = { campus: "ALL", batch: "ALL", semester: "ALL" };
+  let userSettings = { campus: "ALL", batch: "ALL" };
 
   function injectStyles() {
     if (document.getElementById("cwa-styles")) return;
@@ -229,15 +226,9 @@
   }
 
   function normalizeBatchValue(batchValue) {
-    const upper = String(batchValue || "ALL").toUpperCase().trim();
-    if (upper !== "WEEKDAY" && upper !== "WEEKEND") return "ALL";
-    return upper;
-  }
-
-  function normalizeSemesterValue(semesterValue) {
-    const upper = String(semesterValue || "ALL").toUpperCase().trim();
-    if (SEMESTER_OPTIONS.indexOf(upper) === -1) return "ALL";
-    return upper;
+    const value = String(batchValue || "ALL").trim();
+    if (value !== "Weekday" && value !== "Weekend") return "ALL";
+    return value;
   }
 
   function saveUserSettings(settings) {
@@ -250,70 +241,50 @@
       callback({
         campus: normalizeCampusValue(stored.campus || "ALL"),
         batch: normalizeBatchValue(stored.batch || "ALL"),
-        semester: normalizeSemesterValue(stored.semester || "ALL"),
       });
     });
   }
 
-  function extractCampusScope(taskName) {
-    const rawTitle = String(taskName || "");
-    const parenthesized = [];
+  function getStrictlyFilteredDeadlines(deadlines) {
+    const now = new Date();
+    const filtered = [];
 
-    rawTitle.replace(/\(([^)]*)\)/g, function (_m, group) {
-      if (group) parenthesized.push(group);
-      return _m;
+    const batch = normalizeBatchValue(userSettings.batch);
+    const campus = normalizeCampusValue(userSettings.campus);
+    const otherCampuses = ["MALABE", "KANDY", "MATARA", "NORTHERN", "PRORATA"].filter(function (c) {
+      return c !== campus.toUpperCase();
     });
 
-    const uppercaseChunks = rawTitle.match(/\b[A-Z][A-Z\s]{2,}\b/g) || [];
-    return parenthesized.concat(uppercaseChunks).join(" ").toUpperCase().trim();
-  }
+    const items = deadlines || [];
+    for (let i = 0; i < items.length; i += 1) {
+      const item = items[i];
+      const parsed = parseDeadlineDate(item.dueDate);
+      if (!parsed || parsed <= now) continue;
 
-  function passSemesterFilter(item, settings) {
-    const selectedSemester = normalizeSemesterValue(settings.semester);
-    if (selectedSemester === "ALL") return true;
+      const titleUpper = String(item.taskName || "").toUpperCase();
 
-    const moduleTitleUpper = String(item.moduleTitle || "").toUpperCase();
-    const semesterToken = "[" + selectedSemester + "]";
-    return moduleTitleUpper.indexOf(semesterToken) !== -1;
-  }
+      if (batch === "Weekday" && titleUpper.indexOf("WEEKEND") !== -1) continue;
+      if (batch === "Weekend" && titleUpper.indexOf("WEEKDAY") !== -1) continue;
 
-  function passBatchFilter(taskName, settings) {
-    const titleUpper = String(taskName || "").toUpperCase();
-    const batch = normalizeBatchValue(settings.batch);
+      if (campus !== "ALL" && titleUpper.indexOf("ALL CENTERS") === -1) {
+        let containsOtherCampus = false;
+        for (let j = 0; j < otherCampuses.length; j += 1) {
+          if (titleUpper.indexOf(otherCampuses[j]) !== -1) {
+            containsOtherCampus = true;
+            break;
+          }
+        }
+        if (containsOtherCampus) continue;
+      }
 
-    if (batch === "WEEKDAY" && titleUpper.indexOf("WEEKEND") !== -1) return false;
-    if (batch === "WEEKEND" && titleUpper.indexOf("WEEKDAY") !== -1) return false;
-    return true;
-  }
-
-  function passCampusFilter(taskName, settings) {
-    const selectedCampus = normalizeCampusValue(settings.campus);
-    if (selectedCampus === "ALL") return true;
-
-    const scope = extractCampusScope(taskName);
-    if (!scope) return true;
-
-    const hasCampusModifier = CAMPUS_MODIFIERS.some(function (modifier) {
-      return scope.indexOf(modifier) !== -1;
-    });
-
-    if (!hasCampusModifier) return true;
-    if (scope.indexOf(selectedCampus) !== -1) return true;
-
-    for (let i = 0; i < CAMPUS_MODIFIERS.length; i += 1) {
-      if (scope.indexOf(CAMPUS_MODIFIERS[i]) !== -1) return false;
+      filtered.push(item);
     }
 
-    return true;
-  }
-
-  function applyUserFilters(deadlines, settings) {
-    return (deadlines || []).filter(function (item) {
-      if (!passSemesterFilter(item, settings)) return false;
-      if (!passBatchFilter(item.taskName, settings)) return false;
-      if (!passCampusFilter(item.taskName, settings)) return false;
-      return true;
+    filtered.sort(function (a, b) {
+      return parseDeadlineDate(a.dueDate) - parseDeadlineDate(b.dueDate);
     });
+
+    return filtered;
   }
 
   async function scrapeDeadlines() {
@@ -545,19 +516,9 @@
   }
 
   function renderDeadlines(listRoot, deadlines) {
-    while (listRoot.firstChild) {
-      listRoot.removeChild(listRoot.firstChild);
-    }
+    listRoot.innerHTML = "";
 
-    const now = new Date();
-    const filteredDeadlines = applyUserFilters(deadlines || [], userSettings)
-      .filter(function (item) {
-        const parsed = parseDeadlineDate(item.dueDate);
-        return parsed && parsed > now;
-      })
-      .sort(function (a, b) {
-        return parseDeadlineDate(a.dueDate) - parseDeadlineDate(b.dueDate);
-      });
+    const filteredDeadlines = getStrictlyFilteredDeadlines(deadlines || []);
 
     if (filteredDeadlines.length === 0) {
       const empty = document.createElement("li");
@@ -581,7 +542,7 @@
 
     const nowMs = Date.now();
     const urgentWindowMs = 2 * 24 * 60 * 60 * 1000;
-    const filtered = applyUserFilters(deadlines || [], userSettings);
+    const filtered = getStrictlyFilteredDeadlines(deadlines || []);
 
     const urgentCount = filtered.reduce(function (count, item) {
       const parsed = parseDeadlineDate(item.dueDate);
@@ -692,10 +653,6 @@
       + '<div class="cwa-inline-field">'
       + '<label for="cwa-settings-batch">Batch Type</label>'
       + '<select id="cwa-settings-batch"></select>'
-      + "</div>"
-      + '<div class="cwa-inline-field">'
-      + '<label for="cwa-settings-semester">Intake/Semester</label>'
-      + '<select id="cwa-settings-semester"></select>'
       + '<div class="cwa-settings-summary" id="cwa-settings-summary"></div>'
       + "</div>"
       + '<div class="cwa-inline-actions">'
@@ -737,7 +694,6 @@
     const inlinePanel = settingsPanelLi.querySelector("#cwa-inline-settings-panel");
     const campusSelect = settingsPanelLi.querySelector("#cwa-settings-campus");
     const batchSelect = settingsPanelLi.querySelector("#cwa-settings-batch");
-    const semesterSelect = settingsPanelLi.querySelector("#cwa-settings-semester");
     const summary = settingsPanelLi.querySelector("#cwa-settings-summary");
     const settingsToggle = header.querySelector("#cwa-inline-settings-toggle");
     const cancelBtn = settingsPanelLi.querySelector("#cwa-settings-cancel");
@@ -755,13 +711,6 @@
       option.value = optionDef.value;
       option.textContent = optionDef.label;
       batchSelect.appendChild(option);
-    });
-
-    SEMESTER_OPTIONS.forEach(function (semester) {
-      const option = document.createElement("option");
-      option.value = semester;
-      option.textContent = semester;
-      semesterSelect.appendChild(option);
     });
 
     function setSettingsOpen(isOpen) {
@@ -787,17 +736,16 @@
         return opt.value === batchSelect.value;
       }) || {}).label || "All";
 
-      summary.textContent = "Profile: " + campusLabel + " / " + batchLabel + " / " + semesterSelect.value;
+      summary.textContent = "Profile: " + campusLabel + " / " + batchLabel;
     }
 
     function loadPanelFromSettings() {
       campusSelect.value = normalizeCampusValue(userSettings.campus);
       batchSelect.value = normalizeBatchValue(userSettings.batch);
-      semesterSelect.value = normalizeSemesterValue(userSettings.semester);
       updateSummary();
     }
 
-    [campusSelect, batchSelect, semesterSelect].forEach(function (selectEl) {
+    [campusSelect, batchSelect].forEach(function (selectEl) {
       selectEl.addEventListener("change", updateSummary);
       selectEl.addEventListener("click", function (event) {
         event.stopPropagation();
@@ -828,12 +776,11 @@
       userSettings = {
         campus: normalizeCampusValue(campusSelect.value),
         batch: normalizeBatchValue(batchSelect.value),
-        semester: normalizeSemesterValue(semesterSelect.value),
       };
 
       saveUserSettings(userSettings);
       setSettingsOpen(false);
-      renderDeadlines(listHost, currentDeadlines);
+      renderDeadlines(currentListHost || listHost, currentDeadlines);
       updateNotificationBadge(currentDeadlines);
     });
 
