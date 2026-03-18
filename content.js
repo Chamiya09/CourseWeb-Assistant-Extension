@@ -10,6 +10,7 @@
   const DEADLINE_WINDOW_DAYS = 7;
   const STORAGE_KEY = "cwa_deadlines";
   const SETTINGS_STORAGE_KEY = "cwa_user_settings";
+  const ACRONYM_CACHE_STORAGE_KEY = "cwa_acronym_cache";
 
   const CAMPUS_OPTIONS = [
     { value: "ALL", label: "All Centers" },
@@ -27,6 +28,10 @@
   ];
 
   const moduleNameCache = {};
+  const acronymCache = {};
+  const pendingAcronymFetches = new Set();
+
+  let acronymCachePersistTimer = null;
 
   let countdownInterval = null;
   let currentDeadlines = [];
@@ -186,34 +191,32 @@
   function generateAcronym(fullCourseName) {
     if (!fullCourseName) return "GEN";
 
-    const stopWords = ["and", "of", "the", "for", "in", "to", "a", "&"];
-    const raw = String(fullCourseName).trim();
-    const match = raw.match(/-\s*(.+?)\s*\[/);
+    let coreName = String(fullCourseName).trim();
 
-    let coreName = "";
-    if (match && match[1]) {
-      coreName = match[1].trim();
-    } else {
-      const parts = raw.split("-");
-      coreName = parts.length > 1 ? parts.slice(1).join("-").trim() : raw;
+    const hyphenIndex = coreName.indexOf("-");
+    if (hyphenIndex !== -1) {
+      coreName = coreName.substring(hyphenIndex + 1).trim();
+    }
+
+    const bracketIndex = coreName.indexOf("[");
+    if (bracketIndex !== -1) {
+      coreName = coreName.substring(0, bracketIndex).trim();
     }
 
     if (!coreName) return "GEN";
 
-    const words = coreName
-      .split(/\s+/)
-      .map(function (word) {
-        return word.replace(/[^A-Za-z0-9&]/g, "").trim();
-      })
-      .filter(function (word) {
-        return word && stopWords.indexOf(word.toLowerCase()) === -1;
-      });
+    const stopWords = ["and", "of", "the", "for", "in", "to", "a", "&", "introduction"];
+    const words = coreName.split(/\s+/);
+    let acronym = "";
 
-    if (words.length === 0) return "GEN";
+    words.forEach(function (word) {
+      const cleanWord = word.replace(/[^a-zA-Z]/g, "").toLowerCase();
+      if (cleanWord && stopWords.indexOf(cleanWord) === -1) {
+        acronym += cleanWord.charAt(0).toUpperCase();
+      }
+    });
 
-    return words.map(function (word) {
-      return word.charAt(0).toUpperCase();
-    }).join("");
+    return acronym || "GEN";
   }
 
   function normalizeCampusValue(campusValue) {
@@ -235,6 +238,35 @@
     chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: settings });
   }
 
+  function loadAcronymCache(callback) {
+    chrome.storage.local.get([ACRONYM_CACHE_STORAGE_KEY], function (result) {
+      const stored = result[ACRONYM_CACHE_STORAGE_KEY];
+      const map = (stored && typeof stored === "object") ? stored : {};
+
+      Object.keys(acronymCache).forEach(function (key) {
+        delete acronymCache[key];
+      });
+
+      Object.keys(map).forEach(function (key) {
+        acronymCache[key] = map[key];
+      });
+
+      callback(acronymCache);
+    });
+  }
+
+  function persistAcronymCache() {
+    chrome.storage.local.set({ [ACRONYM_CACHE_STORAGE_KEY]: acronymCache });
+  }
+
+  function queueAcronymCachePersist() {
+    if (acronymCachePersistTimer) return;
+    acronymCachePersistTimer = setTimeout(function () {
+      acronymCachePersistTimer = null;
+      persistAcronymCache();
+    }, 200);
+  }
+
   function loadUserSettings(callback) {
     chrome.storage.local.get([SETTINGS_STORAGE_KEY], function (result) {
       const stored = result[SETTINGS_STORAGE_KEY] || {};
@@ -243,6 +275,15 @@
         batch: normalizeBatchValue(stored.batch || "ALL"),
       });
     });
+  }
+
+  function getSafeUrlSelector(url) {
+    if (!url) return "";
+    if (window.CSS && typeof window.CSS.escape === "function") {
+      return window.CSS.escape(url);
+    }
+
+    return String(url).replace(/(["\\])/g, "\\$1");
   }
 
   function getStrictlyFilteredDeadlines(deadlines) {
@@ -292,37 +333,27 @@
     const now = new Date();
 
     const eventItems = document.querySelectorAll('.event[data-eventtype-course="1"]');
-
-    async function resolveModuleDetails(url) {
-      if (!url) return { moduleAcronym: "GEN", moduleTitle: "" };
-      if (moduleNameCache[url]) return moduleNameCache[url];
-
-      try {
-        const response = await fetch(url, { credentials: "include" });
-        if (!response.ok) {
-          moduleNameCache[url] = { moduleAcronym: "GEN", moduleTitle: "" };
-          return moduleNameCache[url];
-        }
-
-        const html = await response.text();
-        const doc = new DOMParser().parseFromString(html, "text/html");
-
-        const courseLink = doc.querySelector('.breadcrumb a[href*="/course/view.php?id="]');
-        const moduleTitle = courseLink ? courseLink.textContent.trim() : "";
-
-        moduleNameCache[url] = {
-          moduleAcronym: generateAcronym(moduleTitle),
-          moduleTitle: moduleTitle,
-        };
-
-        return moduleNameCache[url];
-      } catch (_error) {
-        moduleNameCache[url] = { moduleAcronym: "GEN", moduleTitle: "" };
-        return moduleNameCache[url];
-      }
+    if (!eventItems || eventItems.length === 0) {
+      // Non-dashboard pages often have no timeline events; keep existing storage as-is.
+      return;
     }
 
-    const processedItems = await Promise.all(Array.from(eventItems).map(async function (event) {
+    function extractCourseNameFromEvent(eventItem) {
+      if (!eventItem) return "";
+
+      const smallTag = eventItem.querySelector("small.mb-0");
+      if (!smallTag || !smallTag.textContent) return "";
+
+      const text = smallTag.textContent.trim();
+      if (text.indexOf("·") === -1) return "";
+
+      const pieces = text.split("·");
+      if (pieces.length < 2) return "";
+
+      return pieces[1].trim();
+    }
+
+    const processedItems = Array.from(eventItems).map(function (event) {
       const isCourseEvent = event.getAttribute("data-eventtype-course") === "1";
       const isSiteEvent = event.getAttribute("data-eventtype-site") === "1";
       if (!isCourseEvent || isSiteEvent) return null;
@@ -352,16 +383,29 @@
 
       if (!taskName || !dueDate || !parsedDate || parsedDate <= now) return null;
 
-      const details = await resolveModuleDetails(url);
+      const fallbackTitle = extractCourseNameFromEvent(event);
+      const cachedAcronym = url ? acronymCache[url] : "";
+      const moduleAcronym = cachedAcronym || generateAcronym(fallbackTitle);
+      const moduleTitle = fallbackTitle;
+
+      const details = {
+        moduleAcronym: moduleAcronym,
+        moduleTitle: moduleTitle,
+        resolvedUrl: url,
+      };
+
+      if (url) {
+        moduleNameCache[url] = details;
+      }
 
       return {
         taskName: taskName,
         dueDate: dueDate,
-        url: url,
+        url: details.resolvedUrl || url,
         moduleAcronym: details.moduleAcronym,
         moduleTitle: details.moduleTitle,
       };
-    }));
+    });
 
     processedItems.forEach(function (item) {
       if (!item) return;
@@ -374,8 +418,172 @@
     return deadlines;
   }
 
+  async function fetchExactModuleDetails(url, fallbackTitle) {
+    if (!url) {
+      return {
+        moduleTitle: fallbackTitle || "",
+        moduleAcronym: generateAcronym(fallbackTitle),
+        resolvedUrl: url,
+      };
+    }
+
+    try {
+      const response = await fetch(url, { credentials: "include" });
+      if (!response.ok) {
+        return {
+          moduleTitle: fallbackTitle || "",
+          moduleAcronym: generateAcronym(fallbackTitle),
+          resolvedUrl: url,
+        };
+      }
+
+      const html = await response.text();
+      const doc = new DOMParser().parseFromString(html, "text/html");
+
+      const courseLink = doc.querySelector('.breadcrumb-item a[href*="course/view.php?id="]');
+      let fullCourseName = courseLink
+        ? ((courseLink.getAttribute("title") || courseLink.textContent || "").trim())
+        : "";
+
+      const directLinkNode = doc.querySelector('a[href*="/mod/assign/view.php"], a[href*="/mod/quiz/view.php"], a[href*="/mod/url/view.php"]');
+      let resolvedUrl = url;
+      if (directLinkNode && directLinkNode.getAttribute("href")) {
+        try {
+          resolvedUrl = new URL(directLinkNode.getAttribute("href"), window.location.origin).href;
+        } catch (_e) {
+          resolvedUrl = directLinkNode.getAttribute("href");
+        }
+      }
+
+      if (!fullCourseName) {
+        fullCourseName = fallbackTitle || "";
+      }
+
+      return {
+        moduleTitle: fullCourseName,
+        moduleAcronym: generateAcronym(fullCourseName),
+        resolvedUrl: resolvedUrl,
+      };
+    } catch (_error) {
+      return {
+        moduleTitle: fallbackTitle || "",
+        moduleAcronym: generateAcronym(fallbackTitle),
+        resolvedUrl: url,
+      };
+    }
+  }
+
+  function updateBadgeAcronym(url, acronym) {
+    if (!url || !acronym) return;
+
+    const safe = getSafeUrlSelector(url);
+    if (!safe) return;
+
+    const badge = document.querySelector('.cwa-module-acronym-badge[data-acronym-url="' + safe + '"]');
+    if (badge) {
+      badge.textContent = acronym;
+    }
+
+    document.querySelectorAll('.cwa-module-acronym-badge[data-acronym-url="' + safe + '"]').forEach(function (node) {
+      node.textContent = acronym;
+    });
+  }
+
+  function updateDeadlinesWithResolvedUrl(oldUrl, newUrl) {
+    if (!oldUrl || !newUrl || oldUrl === newUrl) return;
+
+    currentDeadlines = (currentDeadlines || []).map(function (item) {
+      if (!item || item.url !== oldUrl) return item;
+      return Object.assign({}, item, { url: newUrl });
+    });
+
+    loadDeadlines(function (saved) {
+      const list = Array.isArray(saved) ? saved : [];
+      const updated = list.map(function (item) {
+        if (!item || item.url !== oldUrl) return item;
+        return Object.assign({}, item, { url: newUrl });
+      });
+      saveDeadlines(updated);
+    });
+
+    const safeOld = getSafeUrlSelector(oldUrl);
+    const safeNew = getSafeUrlSelector(newUrl);
+    if (!safeOld || !safeNew) return;
+
+    document.querySelectorAll('.cwa-module-acronym-badge[data-acronym-url="' + safeOld + '"]').forEach(function (badge) {
+      badge.setAttribute("data-acronym-url", newUrl);
+    });
+  }
+
+  function applyAcronymToState(url, acronym, moduleTitle) {
+    if (!url || !acronym) return;
+
+    currentDeadlines = (currentDeadlines || []).map(function (item) {
+      if (!item || item.url !== url) return item;
+      return Object.assign({}, item, {
+        moduleAcronym: acronym,
+        moduleTitle: moduleTitle || item.moduleTitle || "",
+      });
+    });
+
+    saveDeadlines(currentDeadlines);
+  }
+
+  async function updateMissingAcronymsInBackground(items) {
+    const queue = Array.isArray(items) ? items : [];
+    for (let i = 0; i < queue.length; i += 1) {
+      const item = queue[i];
+      if (!item || !item.url) continue;
+      if (acronymCache[item.url]) continue;
+      if (pendingAcronymFetches.has(item.url)) continue;
+
+      pendingAcronymFetches.add(item.url);
+
+      fetchExactModuleDetails(item.url, item.moduleTitle || "")
+        .then(function (details) {
+          const resolvedUrl = details.resolvedUrl || item.url;
+          const exactAcronym = details.moduleAcronym || generateAcronym(item.moduleTitle || "");
+
+          acronymCache[item.url] = exactAcronym;
+          if (resolvedUrl && resolvedUrl !== item.url) {
+            acronymCache[resolvedUrl] = exactAcronym;
+            updateDeadlinesWithResolvedUrl(item.url, resolvedUrl);
+          }
+
+          queueAcronymCachePersist();
+
+          updateBadgeAcronym(item.url, exactAcronym);
+          if (resolvedUrl && resolvedUrl !== item.url) {
+            updateBadgeAcronym(resolvedUrl, exactAcronym);
+          }
+
+          applyAcronymToState(item.url, exactAcronym, details.moduleTitle);
+          if (resolvedUrl && resolvedUrl !== item.url) {
+            applyAcronymToState(resolvedUrl, exactAcronym, details.moduleTitle);
+          }
+
+          moduleNameCache[item.url] = {
+            moduleAcronym: exactAcronym,
+            moduleTitle: details.moduleTitle || item.moduleTitle || "",
+            resolvedUrl: resolvedUrl,
+          };
+
+          if (resolvedUrl && resolvedUrl !== item.url) {
+            moduleNameCache[resolvedUrl] = moduleNameCache[item.url];
+          }
+        })
+        .catch(function () {
+          // Keep fallback acronym if background fetch fails.
+        })
+        .finally(function () {
+          pendingAcronymFetches.delete(item.url);
+        });
+    }
+  }
+
   function saveDeadlines(deadlines) {
-    chrome.storage.local.set({ [STORAGE_KEY]: deadlines || [] });
+    if (!Array.isArray(deadlines)) return;
+    chrome.storage.local.set({ [STORAGE_KEY]: deadlines });
   }
 
   function loadDeadlines(callback) {
@@ -414,8 +622,13 @@
     const targetDate = parseDeadlineDate(item.dueDate);
     const targetISO = targetDate ? targetDate.toISOString() : "";
 
-    const li = document.createElement("li");
-    li.style.cssText = "padding: 10px 16px; border-bottom: 1px solid #f0f0f0;";
+    const card = document.createElement("a");
+    card.href = item.url || "#";
+    card.className = "list-group-item list-group-item-action";
+    card.style.cssText = "display:block; padding:10px 16px; border:0; border-bottom:1px solid #f0f0f0; text-decoration:none; background:#fff;";
+    if (item.url) {
+      card.title = "Open submission";
+    }
 
     const nameRow = document.createElement("div");
     nameRow.className = "d-flex align-items-center mb-1";
@@ -429,17 +642,19 @@
     badge.className = "badge rounded-pill bg-primary me-2";
     badge.style.cssText = "font-size: 0.75em;";
     badge.textContent = item.moduleAcronym || "GEN";
+    badge.classList.add("cwa-module-acronym-badge");
+    if (item.url) {
+      badge.setAttribute("data-acronym-url", item.url);
+    }
 
-    const link = document.createElement("a");
-    link.href = item.url || "#";
-    link.className = "text-decoration-none";
-    link.style.cssText = "font-weight:600; font-size:.88rem; color:#0d6efd; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:280px; display:inline-block;";
-    link.title = item.taskName;
-    link.textContent = item.taskName;
+    const title = document.createElement("span");
+    title.style.cssText = "font-weight:600; font-size:.88rem; color:#0d6efd; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:280px; display:inline-block;";
+    title.title = item.taskName;
+    title.textContent = item.taskName;
 
     nameRow.appendChild(icon);
     nameRow.appendChild(badge);
-    nameRow.appendChild(link);
+    nameRow.appendChild(title);
 
     const dueRow = document.createElement("div");
     dueRow.className = "d-flex align-items-center mb-2";
@@ -507,12 +722,12 @@
 
     progressWrap.appendChild(bar);
 
-    li.appendChild(nameRow);
-    li.appendChild(dueRow);
-    li.appendChild(countdownRow);
-    li.appendChild(progressWrap);
+    card.appendChild(nameRow);
+    card.appendChild(dueRow);
+    card.appendChild(countdownRow);
+    card.appendChild(progressWrap);
 
-    return li;
+    return card;
   }
 
   function renderDeadlines(listRoot, deadlines) {
@@ -681,8 +896,20 @@
     rescanLink.addEventListener("click", async function (e) {
       e.preventDefault();
       const fresh = await scrapeDeadlines();
-      saveDeadlines(fresh);
-      renderDropdown(fresh);
+
+      if (Array.isArray(fresh)) {
+        saveDeadlines(fresh);
+      }
+
+      loadDeadlines(function (saved) {
+        const normalized = (saved || [])
+          .map(normalizeStoredItem)
+          .filter(function (item) {
+            return !!item;
+          });
+
+        renderDropdown(normalized);
+      });
     });
 
     rescanLi.appendChild(rescanLink);
@@ -805,6 +1032,8 @@
 
     startCountdownTicker();
     updateNotificationBadge(currentDeadlines);
+
+    updateMissingAcronymsInBackground(currentDeadlines);
   }
 
   function normalizeStoredItem(item) {
@@ -834,20 +1063,28 @@
 
     injectStyles();
 
-    loadUserSettings(async function (storedSettings) {
-      userSettings = storedSettings;
+    loadAcronymCache(function () {
+      loadUserSettings(async function (storedSettings) {
+        userSettings = storedSettings;
 
-      const scraped = await scrapeDeadlines();
-      saveDeadlines(scraped);
+        const scraped = await scrapeDeadlines();
+        if (Array.isArray(scraped)) {
+          saveDeadlines(scraped);
+        }
 
-      loadDeadlines(function (saved) {
-        const normalized = saved
-          .map(normalizeStoredItem)
-          .filter(function (item) {
-            return !!item;
-          });
+        loadDeadlines(function (saved) {
+          const normalized = saved
+            .map(normalizeStoredItem)
+            .filter(function (item) {
+              return !!item;
+            });
 
-        renderDropdown(normalized.length > 0 ? normalized : scraped);
+          const renderSource = normalized.length > 0
+            ? normalized
+            : (Array.isArray(scraped) ? scraped : []);
+
+          renderDropdown(renderSource);
+        });
       });
     });
   }
