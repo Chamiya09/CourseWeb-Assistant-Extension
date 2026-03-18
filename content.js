@@ -1,6 +1,6 @@
 // ============================================================
-// CourseWeb Assistant - content.js  v5.0
-// URL-aware deadlines with To Do/Overdue + center filtering.
+// CourseWeb Assistant - content.js  v6.0
+// Upcoming-only deadlines with campus filtering.
 // ============================================================
 
 (function () {
@@ -19,75 +19,17 @@
     "Matara Center",
     "Prorata",
   ];
-  const CENTER_KEYWORDS = ["malabe", "northern", "kandy", "matara", "prorata"];
-  const moduleNameCache = {};
 
+  const moduleNameCache = {};
   let countdownInterval = null;
-  let activeFilter = "todo"; // "todo" | "overdue"
   let selectedCampus = DEFAULT_CAMPUS;
 
-  function injectModernFilterStyles() {
-    if (document.getElementById("cwa-modern-filter-styles")) return;
+  function injectStyles() {
+    if (document.getElementById("cwa-styles")) return;
 
     const style = document.createElement("style");
-    style.id = "cwa-modern-filter-styles";
+    style.id = "cwa-styles";
     style.textContent = [
-      ".cwa-segmented-control {",
-      "  position: relative;",
-      "  display: flex;",
-      "  align-items: center;",
-      "  gap: 4px;",
-      "  padding: 4px;",
-      "  border-radius: 50px;",
-      "  background: rgba(233, 236, 239, 0.7);",
-      "  backdrop-filter: blur(6px);",
-      "  -webkit-backdrop-filter: blur(6px);",
-      "  border: 1px solid rgba(0, 0, 0, 0.05);",
-      "  overflow: hidden;",
-      "}",
-      ".cwa-segmented-control::before {",
-      "  content: '';",
-      "  position: absolute;",
-      "  top: 4px;",
-      "  left: 4px;",
-      "  width: calc(50% - 4px);",
-      "  height: calc(100% - 8px);",
-      "  border-radius: 999px;",
-      "  background: #ffffff;",
-      "  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12);",
-      "  transform: translateX(0);",
-      "  transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 200ms ease;",
-      "}",
-      ".cwa-segmented-control[data-active='overdue']::before {",
-      "  transform: translateX(calc(100% + 4px));",
-      "}",
-      ".cwa-segment-btn {",
-      "  position: relative;",
-      "  z-index: 1;",
-      "  flex: 1;",
-      "  border: 0;",
-      "  background: transparent;",
-      "  border-radius: 999px;",
-      "  padding: 6px 10px;",
-      "  font-size: 0.76rem;",
-      "  font-weight: 700;",
-      "  letter-spacing: 0.01em;",
-      "  color: #6c757d;",
-      "  transition: color 220ms ease, transform 220ms ease;",
-      "}",
-      ".cwa-segment-btn:hover {",
-      "  color: #495057;",
-      "}",
-      ".cwa-segment-btn:focus {",
-      "  outline: none;",
-      "}",
-      ".cwa-segment-btn.active {",
-      "  color: #0f172a;",
-      "  transform: translateY(-1px);",
-      "}",
-      ".cwa-segment-btn i {",
-      "  margin-right: 5px;",
-      "}",
       ".cwa-campus-select-wrap {",
       "  margin-top: 8px;",
       "}",
@@ -180,45 +122,89 @@
     return null;
   }
 
-  function formatCountdown(msLeft) {
-    if (msLeft <= 0) return "Overdue";
+  function generateAcronym(fullCourseName) {
+    if (!fullCourseName) return "GEN";
 
-    const totalSec = Math.floor(msLeft / 1000);
-    const d = Math.floor(totalSec / 86400);
-    const h = Math.floor((totalSec % 86400) / 3600);
-    const m = Math.floor((totalSec % 3600) / 60);
-    const s = totalSec % 60;
+    const stopWords = ["and", "of", "the", "for", "in", "to", "a", "&"];
+    const raw = String(fullCourseName).trim();
+    const match = raw.match(/-\s*(.+?)\s*\[/);
 
-    const parts = [];
-    if (d > 0) parts.push(d + "d");
-    if (h > 0) parts.push(h + "h");
-    if (m > 0) parts.push(m + "m");
-    parts.push(s + "s");
+    let coreName = "";
+    if (match && match[1]) {
+      coreName = match[1].trim();
+    } else {
+      const parts = raw.split("-");
+      coreName = parts.length > 1 ? parts.slice(1).join("-").trim() : raw;
+    }
 
-    return parts.join(" ") + " left";
+    if (!coreName) return "GEN";
+
+    const words = coreName
+      .split(/\s+/)
+      .map(function (word) {
+        return word.replace(/[^A-Za-z0-9&]/g, "").trim();
+      })
+      .filter(function (word) {
+        return word && stopWords.indexOf(word.toLowerCase()) === -1;
+      });
+
+    if (words.length === 0) return "GEN";
+
+    return words.map(function (word) {
+      return word.charAt(0).toUpperCase();
+    }).join("");
   }
 
-  function progressBarClass(msLeft) {
-    const days = msLeft / (1000 * 60 * 60 * 24);
-    if (days < 2) return "bg-danger";
-    if (days <= 5) return "bg-warning";
-    return "bg-success";
+  function extractCampusScope(taskName) {
+    const rawTitle = String(taskName || "");
+    const parenthesized = [];
+
+    rawTitle.replace(/\(([^)]*)\)/g, function (_m, group) {
+      if (group) parenthesized.push(group);
+      return _m;
+    });
+
+    const uppercaseChunks = rawTitle.match(/\b[A-Z][A-Z\s]{2,}\b/g) || [];
+    return parenthesized.concat(uppercaseChunks).join(" ").toUpperCase().trim();
   }
 
-  function progressPercent(targetDate) {
-    const windowMs = DEADLINE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
-    const startMs = targetDate.getTime() - windowMs;
-    const now = Date.now();
-    const elapsed = now - startMs;
-    return Math.min(100, Math.max(0, Math.round((elapsed / windowMs) * 100)));
+  function normalizeSelectedCampus(campusLabel) {
+    if (!campusLabel || campusLabel === DEFAULT_CAMPUS) return "ALL";
+    const lower = campusLabel.toLowerCase();
+    if (lower.indexOf("malabe") !== -1) return "MALABE";
+    if (lower.indexOf("northern") !== -1) return "NORTHERN";
+    if (lower.indexOf("kandy") !== -1) return "KANDY";
+    if (lower.indexOf("matara") !== -1) return "MATARA";
+    if (lower.indexOf("prorata") !== -1 || lower.indexOf("pro rata") !== -1) return "PRORATA";
+    return String(campusLabel).toUpperCase().trim();
+  }
+
+  function filterByCampus(deadlines, campusLabel) {
+    const allModifiers = ["MALABE", "KANDY", "MATARA", "NORTHERN", "PRORATA", "ALL CENTERS"];
+    const selectedUpper = normalizeSelectedCampus(campusLabel);
+
+    return deadlines.filter(function (item) {
+      const scope = extractCampusScope(item.taskName);
+
+      if (campusLabel === DEFAULT_CAMPUS || selectedUpper === "ALL") return true;
+      if (!scope) return true;
+      if (scope.includes(selectedUpper)) return true;
+
+      for (let i = 0; i < allModifiers.length; i += 1) {
+        const modifier = allModifiers[i];
+        if (!scope.includes(modifier)) continue;
+        if (modifier !== selectedUpper) return false;
+      }
+
+      return true;
+    });
   }
 
   async function scrapeDeadlines() {
     const deadlines = [];
+    const now = new Date();
 
-    const eventItems = document.querySelectorAll(
-      '.event[data-eventtype-course="1"]'
-    );
+    const eventItems = document.querySelectorAll('.event[data-eventtype-course="1"]');
 
     async function resolveModuleAcronym(url) {
       if (!url) return "GEN";
@@ -236,8 +222,8 @@
 
         const courseLink = doc.querySelector('.breadcrumb a[href*="/course/view.php?id="]');
         const fullCourseName = courseLink ? courseLink.textContent.trim() : "";
-
         const acronym = generateAcronym(fullCourseName);
+
         moduleNameCache[url] = acronym;
         return acronym;
       } catch (_error) {
@@ -263,17 +249,19 @@
 
       const dateNode = event.querySelector(".date.small, .date, [data-region='event-date'], time[datetime]");
       const dueDate = dateNode ? dateNode.textContent.trim().replace(/\s+/g, " ") : "";
+      const parsedDate = parseDeadlineDate(dueDate);
 
       let url = "";
       if (taskLink && taskLink.getAttribute("href")) {
         try {
           url = new URL(taskLink.getAttribute("href"), window.location.origin).href;
-        } catch (e) {
+        } catch (_e) {
           url = taskLink.getAttribute("href");
         }
       }
 
-      if (!taskName || !dueDate) return null;
+      // Future-only persistence: drop overdue/past items at scrape level.
+      if (!taskName || !dueDate || !parsedDate || parsedDate <= now) return null;
 
       const moduleAcronym = await resolveModuleAcronym(url);
 
@@ -293,16 +281,11 @@
       if (!duplicate) deadlines.push(item);
     });
 
-    console.info("[CWA] Scraped deadlines:", deadlines.length);
     return deadlines;
   }
 
   function saveDeadlines(deadlines) {
-    chrome.storage.local.set({
-      [STORAGE_KEY]: deadlines,
-    }, function () {
-      console.info("[CWA] Saved deadlines:", deadlines.length);
-    });
+    chrome.storage.local.set({ [STORAGE_KEY]: deadlines || [] });
   }
 
   function loadDeadlines(callback) {
@@ -312,9 +295,7 @@
   }
 
   function saveSelectedCampus(campusValue) {
-    chrome.storage.local.set({
-      [CAMPUS_STORAGE_KEY]: campusValue,
-    });
+    chrome.storage.local.set({ [CAMPUS_STORAGE_KEY]: campusValue });
   }
 
   function loadSelectedCampus(callback) {
@@ -328,108 +309,33 @@
     });
   }
 
-  function extractCampusScope(taskName) {
-    const rawTitle = String(taskName || "");
-    const parenthesized = [];
+  function formatCountdown(msLeft) {
+    if (msLeft <= 0) return "Overdue";
 
-    rawTitle.replace(/\(([^)]*)\)/g, function (_match, group) {
-      if (group) parenthesized.push(group);
-      return _match;
-    });
+    const totalSec = Math.floor(msLeft / 1000);
+    const d = Math.floor(totalSec / 86400);
+    const h = Math.floor((totalSec % 86400) / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
 
-    // Capture ALL-CAPS chunks that often carry center hints.
-    const uppercaseChunks = rawTitle.match(/\b[A-Z][A-Z\s]{2,}\b/g) || [];
+    const parts = [];
+    if (d > 0) parts.push(d + "d");
+    if (h > 0) parts.push(h + "h");
+    if (m > 0) parts.push(m + "m");
+    parts.push(s + "s");
 
-    return parenthesized.concat(uppercaseChunks).join(" ").toLowerCase().trim();
+    return parts.join(" ") + " left";
   }
 
-  function detectMentionedCampuses(scopeText) {
-    const scope = String(scopeText || "").toLowerCase().trim();
-    return CENTER_KEYWORDS.filter(function (center) {
-      return scope.includes(center);
-    });
+  function progressPercent(targetDate) {
+    const windowMs = DEADLINE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+    const startMs = targetDate.getTime() - windowMs;
+    const now = Date.now();
+    const elapsed = now - startMs;
+    return Math.min(100, Math.max(0, Math.round((elapsed / windowMs) * 100)));
   }
 
-  function normalizeSelectedCampus(campusLabel) {
-    if (!campusLabel || campusLabel === DEFAULT_CAMPUS) return "all";
-    const lower = campusLabel.toLowerCase();
-    if (lower.indexOf("malabe") !== -1) return "malabe";
-    if (lower.indexOf("northern") !== -1) return "northern";
-    if (lower.indexOf("kandy") !== -1) return "kandy";
-    if (lower.indexOf("matara") !== -1) return "matara";
-    if (lower.indexOf("prorata") !== -1 || lower.indexOf("pro rata") !== -1) return "prorata";
-    return lower;
-  }
-
-  function generateAcronym(fullCourseName) {
-    if (!fullCourseName) return "GEN";
-
-    const stopWords = ["and", "of", "the", "for", "in", "to", "a", "&"];
-    const raw = String(fullCourseName).trim();
-
-    // Primary extraction: text between first hyphen and opening bracket.
-    const match = raw.match(/-\s*(.+?)\s*\[/);
-
-    let coreName = "";
-    if (match && match[1]) {
-      coreName = match[1].trim();
-    } else {
-      // Fallback: split by '-' and use second segment if available.
-      const parts = raw.split("-");
-      coreName = parts.length > 1 ? parts.slice(1).join("-").trim() : raw;
-    }
-
-    if (!coreName) return "GEN";
-
-    const words = coreName
-      .split(/\s+/)
-      .map(function (word) {
-        return word.replace(/[^A-Za-z0-9&]/g, "").trim();
-      })
-      .filter(function (word) {
-        return word && stopWords.indexOf(word.toLowerCase()) === -1;
-      });
-
-    if (words.length === 0) return "GEN";
-
-    return words
-      .map(function (word) {
-        return word.charAt(0).toUpperCase();
-      })
-      .join("");
-  }
-
-  function filterByCampus(deadlines, campusLabel) {
-    const allModifiers = ["MALABE", "KANDY", "MATARA", "NORTHERN", "PRORATA", "ALL CENTERS"];
-    const selectedKey = normalizeSelectedCampus(campusLabel);
-    const selectedCampusUpper = String(campusLabel || "").toUpperCase().trim();
-    const selectedKeyUpper = String(selectedKey || "").toUpperCase().trim();
-
-    return deadlines.filter(function (item) {
-      const titleUpper = String(item.taskName || "").toUpperCase().trim();
-
-      // Rule 1 (Show All)
-      if (campusLabel === DEFAULT_CAMPUS || selectedKey === "all") return true;
-
-      // Rule 2 (Exact Match)
-      if (selectedCampusUpper && titleUpper.includes(selectedCampusUpper)) return true;
-      if (selectedKeyUpper && selectedKeyUpper !== "ALL" && titleUpper.includes(selectedKeyUpper)) return true;
-
-      // Rule 3 (Strict Exclusion)
-      for (let i = 0; i < allModifiers.length; i += 1) {
-        const modifier = allModifiers[i];
-        if (!titleUpper.includes(modifier)) continue;
-
-        const isSelectedModifier = modifier === selectedCampusUpper || modifier === selectedKeyUpper;
-        if (!isSelectedModifier) return false;
-      }
-
-      // Rule 4 (Generic Allowed)
-      return true;
-    });
-  }
-
-  function createTodoCard(item) {
+  function createDeadlineCard(item) {
     const targetDate = parseDeadlineDate(item.dueDate);
     const targetISO = targetDate ? targetDate.toISOString() : "";
 
@@ -508,9 +414,17 @@
 
     if (targetDate) {
       const msLeft = targetDate.getTime() - Date.now();
+      const daysLeft = msLeft / (1000 * 60 * 60 * 24);
+      let urgencyClass = "bg-danger";
+      if (daysLeft > 4) {
+        urgencyClass = "bg-success";
+      } else if (daysLeft >= 1 && daysLeft <= 4) {
+        urgencyClass = "bg-warning";
+      }
+
       bar.dataset.target = targetISO;
       bar.style.width = progressPercent(targetDate) + "%";
-      bar.classList.add(progressBarClass(msLeft));
+      bar.classList.add(urgencyClass);
     } else {
       bar.style.width = "0%";
       bar.classList.add("bg-secondary");
@@ -526,105 +440,34 @@
     return li;
   }
 
-  function createOverdueCard(item) {
-    const li = document.createElement("li");
-    li.style.cssText = "padding: 10px 16px; border-bottom: 1px solid #f0f0f0;";
-
-    const topRow = document.createElement("div");
-    topRow.className = "d-flex justify-content-between align-items-start mb-1";
-
-    const titleWrap = document.createElement("div");
-    titleWrap.className = "d-flex align-items-center";
-    titleWrap.style.cssText = "min-width:0;";
-
-    const icon = document.createElement("i");
-    icon.className = "fa fa-book";
-    icon.setAttribute("aria-hidden", "true");
-    icon.style.cssText = "color:#6c757d; margin-right:7px; font-size:.86rem;";
-
-    const acronymBadge = document.createElement("span");
-    acronymBadge.className = "badge rounded-pill bg-primary me-2";
-    acronymBadge.style.cssText = "font-size: 0.75em;";
-    acronymBadge.textContent = item.moduleAcronym || "GEN";
-
-    const link = document.createElement("a");
-    link.href = item.url || "#";
-    link.className = "text-decoration-none";
-    link.style.cssText = "font-weight:600; font-size:.88rem; color:#0d6efd; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px; display:inline-block;";
-    link.title = item.taskName;
-    link.textContent = item.taskName;
-
-    titleWrap.appendChild(icon);
-    titleWrap.appendChild(acronymBadge);
-    titleWrap.appendChild(link);
-
-    const overdueBadge = document.createElement("span");
-    overdueBadge.className = "badge bg-danger";
-    overdueBadge.innerHTML = '<i class="fa fa-exclamation-circle" aria-hidden="true" style="margin-right:4px;"></i>Missing/Overdue';
-
-    topRow.appendChild(titleWrap);
-    topRow.appendChild(overdueBadge);
-
-    const dueRow = document.createElement("div");
-    dueRow.className = "d-flex align-items-center";
-
-    const dueIcon = document.createElement("i");
-    dueIcon.className = "fa fa-calendar";
-    dueIcon.setAttribute("aria-hidden", "true");
-    dueIcon.style.cssText = "color:#6c757d; margin-right:7px; font-size:.8rem;";
-
-    const dueText = document.createElement("span");
-    dueText.style.cssText = "font-size:.79rem; color:#6c757d;";
-    dueText.textContent = item.dueDate;
-
-    dueRow.appendChild(dueIcon);
-    dueRow.appendChild(dueText);
-
-    li.appendChild(topRow);
-    li.appendChild(dueRow);
-    return li;
-  }
-
-  function filterDeadlines(deadlines, filter) {
-    const now = new Date();
-
-    return deadlines.filter(function (item) {
-      const parsed = parseDeadlineDate(item.dueDate);
-      if (!parsed) return false;
-
-      if (filter === "todo") return parsed >= now;
-      return parsed < now;
-    });
-  }
-
-  function renderDeadlines(listRoot, deadlines, filter) {
+  function renderDeadlines(listRoot, deadlines) {
     while (listRoot.firstChild) {
       listRoot.removeChild(listRoot.firstChild);
     }
 
-    const campusFiltered = filterByCampus(deadlines, selectedCampus);
-    const filtered = filterDeadlines(campusFiltered, filter)
+    const now = new Date();
+    const campusFiltered = filterByCampus(deadlines || [], selectedCampus)
+      .filter(function (item) {
+        const parsed = parseDeadlineDate(item.dueDate);
+        return parsed && parsed > now;
+      })
       .sort(function (a, b) {
         return parseDeadlineDate(a.dueDate) - parseDeadlineDate(b.dueDate);
       });
 
-    if (filtered.length === 0) {
+    if (campusFiltered.length === 0) {
       const empty = document.createElement("li");
       empty.innerHTML =
         '<div style="padding:14px 16px; text-align:center; color:#6c757d; font-size:.87rem; font-style:italic;">'
         + '<i class="fa fa-inbox" aria-hidden="true" style="margin-right:6px;"></i>'
-        + (filter === "todo" ? "No upcoming deadlines." : "No overdue deadlines.")
+        + "No upcoming deadlines."
         + "</div>";
       listRoot.appendChild(empty);
       return;
     }
 
-    filtered.forEach(function (item) {
-      if (filter === "todo") {
-        listRoot.appendChild(createTodoCard(item));
-      } else {
-        listRoot.appendChild(createOverdueCard(item));
-      }
+    campusFiltered.forEach(function (item) {
+      listRoot.appendChild(createDeadlineCard(item));
     });
   }
 
@@ -640,10 +483,8 @@
       if (!parsed) return count;
 
       const msLeft = parsed.getTime() - nowMs;
-      const isOverdue = msLeft < 0;
       const isUrgent = msLeft >= 0 && msLeft <= urgentWindowMs;
-
-      return isOverdue || isUrgent ? count + 1 : count;
+      return isUrgent ? count + 1 : count;
     }, 0);
 
     let badge = toggle.querySelector("#cwa-nav-urgent-badge");
@@ -693,20 +534,6 @@
     }, 1000);
   }
 
-  function updateTabButtons(todoBtn, overdueBtn) {
-    const control = todoBtn.closest(".cwa-segmented-control");
-
-    if (activeFilter === "todo") {
-      todoBtn.classList.add("active");
-      overdueBtn.classList.remove("active");
-      if (control) control.setAttribute("data-active", "todo");
-    } else {
-      todoBtn.classList.remove("active");
-      overdueBtn.classList.add("active");
-      if (control) control.setAttribute("data-active", "overdue");
-    }
-  }
-
   function buildDropdown(deadlines) {
     const navItem = document.createElement("li");
     navItem.className = "nav-item dropdown";
@@ -737,15 +564,7 @@
     header.innerHTML =
       '<div style="padding:8px 16px 6px; border-bottom:1px solid #e9ecef;">'
       + '<div style="font-size:.75rem; font-weight:700; letter-spacing:.07em; color:#6c757d; text-transform:uppercase; margin-bottom:8px;">'
-      + '<i class="fa fa-calendar" aria-hidden="true" style="margin-right:6px;"></i>Assignment Deadlines'
-      + "</div>"
-      + '<div class="cwa-segmented-control" data-active="todo" role="tablist" aria-label="Deadline filters">'
-      + '<button type="button" class="cwa-segment-btn active" data-filter="todo" role="tab" aria-selected="true">'
-      + '<i class="fa fa-hourglass-half" aria-hidden="true"></i>To Do'
-      + "</button>"
-      + '<button type="button" class="cwa-segment-btn" data-filter="overdue" role="tab" aria-selected="false">'
-      + '<i class="fa fa-exclamation-triangle" aria-hidden="true"></i>Overdue'
-      + "</button>"
+      + '<i class="fa fa-calendar" aria-hidden="true" style="margin-right:6px;"></i>Upcoming Deadlines'
       + "</div>"
       + '<div class="cwa-campus-select-wrap">'
       + '<select class="form-select form-select-sm cwa-campus-select" id="cwa-campus-select" aria-label="Select center"></select>'
@@ -781,10 +600,7 @@
     navItem.appendChild(toggle);
     navItem.appendChild(menu);
 
-    const todoBtn = header.querySelector('button[data-filter="todo"]');
-    const overdueBtn = header.querySelector('button[data-filter="overdue"]');
     const campusSelect = header.querySelector("#cwa-campus-select");
-
     CAMPUS_OPTIONS.forEach(function (optionLabel) {
       const option = document.createElement("option");
       option.value = optionLabel;
@@ -793,30 +609,18 @@
     });
     campusSelect.value = selectedCampus;
 
-    function rerenderFilteredList() {
-      updateTabButtons(todoBtn, overdueBtn);
-      todoBtn.setAttribute("aria-selected", String(activeFilter === "todo"));
-      overdueBtn.setAttribute("aria-selected", String(activeFilter === "overdue"));
-      renderDeadlines(listHost, deadlines, activeFilter);
+    function rerenderList() {
+      renderDeadlines(listHost, deadlines);
+      updateNotificationBadge(deadlines);
     }
-
-    todoBtn.addEventListener("click", function () {
-      activeFilter = "todo";
-      rerenderFilteredList();
-    });
-
-    overdueBtn.addEventListener("click", function () {
-      activeFilter = "overdue";
-      rerenderFilteredList();
-    });
 
     campusSelect.addEventListener("change", function () {
       selectedCampus = campusSelect.value || DEFAULT_CAMPUS;
       saveSelectedCampus(selectedCampus);
-      rerenderFilteredList();
+      rerenderList();
     });
 
-    rerenderFilteredList();
+    rerenderList();
     return navItem;
   }
 
@@ -828,10 +632,7 @@
       existing.replaceWith(next);
     } else {
       const nav = document.querySelector(NAVBAR_SELECTOR);
-      if (!nav) {
-        console.warn("[CWA] Navbar not found.");
-        return;
-      }
+      if (!nav) return;
       nav.appendChild(next);
     }
 
@@ -842,20 +643,27 @@
   function normalizeStoredItem(item) {
     if (!item) return null;
 
-    const moduleAcronym = item.moduleAcronym || generateAcronym(item.moduleName || "");
     const taskName = item.taskName || item.label || "";
     const dueDate = item.dueDate || item.due || "";
     const url = item.url || "";
+    const moduleAcronym = item.moduleAcronym || generateAcronym(item.moduleName || "");
 
-    if (!taskName || !dueDate) return null;
-    return { moduleAcronym: moduleAcronym, taskName: taskName, dueDate: dueDate, url: url };
+    const parsed = parseDeadlineDate(dueDate);
+    if (!taskName || !dueDate || !parsed || parsed <= new Date()) return null;
+
+    return {
+      taskName: taskName,
+      dueDate: dueDate,
+      url: url,
+      moduleAcronym: moduleAcronym,
+    };
   }
 
   function init() {
     const loggedInMarker = document.querySelector(".usermenu, .userpicture, [data-region='user-menu']");
     if (!loggedInMarker) return;
 
-    injectModernFilterStyles();
+    injectStyles();
 
     loadSelectedCampus(async function (savedCampus) {
       selectedCampus = savedCampus || DEFAULT_CAMPUS;
