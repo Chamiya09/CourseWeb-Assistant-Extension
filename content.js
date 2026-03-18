@@ -818,6 +818,9 @@
   }
 
   function init() {
+    const loggedInMarker = document.querySelector(".usermenu, .userpicture, [data-region='user-menu']");
+    if (!loggedInMarker) return;
+
     injectModernFilterStyles();
 
     loadSelectedCampus(async function (savedCampus) {
