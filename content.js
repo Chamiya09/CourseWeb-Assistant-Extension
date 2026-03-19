@@ -10,6 +10,7 @@
   const DEADLINE_WINDOW_DAYS = 7;
   const STORAGE_KEY = "cwa_deadlines";
   const SETTINGS_STORAGE_KEY = "cwa_user_settings";
+  const UPCOMING_EVENTS_URL = "https://courseweb.sliit.lk/calendar/view.php?view=upcoming";
 
   const CAMPUS_OPTIONS = [
     { value: "ALL", label: "All Centers" },
@@ -212,6 +213,10 @@
     return acronym || "GEN";
   }
 
+  function getModuleAcronym(fullText) {
+    return generateAcronym(fullText || "");
+  }
+
   function getCleanModuleName(fullCourseName) {
     if (!fullCourseName) return "General";
 
@@ -363,71 +368,79 @@
     return toAbsoluteUrl(fallbackHref);
   }
 
-  async function scrapeDeadlines() {
-    const isDashboard = window.location.href.indexOf("/my/") !== -1 || !!document.querySelector(".block_timeline, .block_myoverview");
-    if (!isDashboard) {
-      // Do not scrape or modify storage outside dashboard context.
-      return;
-    }
+  async function fetchUpcomingEvents() {
+    try {
+      const response = await fetch(UPCOMING_EVENTS_URL, {
+        credentials: "include",
+      });
+      if (!response.ok) return [];
 
-    const deadlines = [];
-    const now = new Date();
+      const html = await response.text();
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, "text/html");
 
-    const eventItems = document.querySelectorAll('.event[data-eventtype-course="1"]');
-    if (!eventItems || eventItems.length === 0) {
-      // On dashboard with no events this is a valid empty snapshot.
+      const now = new Date();
+      const deadlines = [];
+      const eventNodes = doc.querySelectorAll(".event, .calendar_event_course, .maincalendar .eventlist .event");
+
+      eventNodes.forEach(function (eventNode) {
+        const eventNameElement = eventNode.querySelector(".event-name, .text-truncate, .name a, h3 a, h4 a, [data-region='event-name'] a");
+        const taskName = eventNameElement
+          ? eventNameElement.textContent.trim().replace(/\s+is\s+due$/i, "").replace(/\s+/g, " ")
+          : "Unknown Task";
+
+        const dateNode = eventNode.querySelector(".date.small, .date, [data-region='event-date'], time[datetime], time");
+        const rawDueDate = dateNode
+          ? (dateNode.getAttribute("datetime") || dateNode.textContent || "")
+          : "";
+        const dueDate = String(rawDueDate).trim().replace(/\s+/g, " ");
+        const parsedDate = parseDeadlineDate(dueDate);
+
+        if (!taskName || !dueDate || !parsedDate || parsedDate <= now) return;
+
+        const courseLinkNode = eventNode.querySelector('a[href*="course/view.php"]');
+        let fullCourseName = courseLinkNode ? courseLinkNode.textContent.trim() : "";
+
+        fullCourseName = fullCourseName.replace(/\s+/g, " ").trim();
+        const moduleAcronym = getModuleAcronym(fullCourseName);
+
+        const actionLink = eventNode.querySelector('a.card-link[href*="/mod/"], a[href*="action=editsubmission"], a[href*="/mod/assign/view.php"], a[href*="/mod/"]');
+        const fallbackLink = eventNameElement || eventNode.querySelector("a[href]");
+        const itemUrl = actionLink
+          ? actionLink.getAttribute("href")
+          : (fallbackLink ? fallbackLink.getAttribute("href") : "");
+
+        const item = {
+          taskName: taskName,
+          dueDate: dueDate,
+          url: toAbsoluteUrl(itemUrl),
+          moduleAcronym: moduleAcronym,
+          cleanModuleName: getCleanModuleName(fullCourseName || taskName),
+          moduleTitle: fullCourseName || taskName,
+        };
+
+        const duplicate = deadlines.some(function (existing) {
+          return existing.taskName === item.taskName && existing.dueDate === item.dueDate && existing.url === item.url;
+        });
+        if (!duplicate) deadlines.push(item);
+      });
+
+      saveDeadlines(deadlines);
+      const normalized = deadlines
+        .map(normalizeStoredItem)
+        .filter(function (item) {
+          return !!item;
+        });
+      renderDropdown(normalized);
+
+      return deadlines;
+    } catch (_error) {
       return [];
     }
+  }
 
-    const processedItems = Array.from(eventItems).map(function (event) {
-      const isCourseEvent = event.getAttribute("data-eventtype-course") === "1";
-      const isSiteEvent = event.getAttribute("data-eventtype-site") === "1";
-      if (!isCourseEvent || isSiteEvent) return null;
-
-      const taskLink = event.querySelector("h4 a, [data-region='event-name'] a, .eventname a, a[href]");
-      const taskNameRaw = taskLink
-        ? (taskLink.getAttribute("title") || taskLink.textContent || "")
-        : ((event.querySelector("h4") || {}).textContent || "");
-
-      const taskName = taskNameRaw
-        .replace(/\s+is\s+due$/i, "")
-        .trim()
-        .replace(/\s+/g, " ");
-
-      const dateNode = event.querySelector(".date.small, .date, [data-region='event-date'], time[datetime]");
-      const dueDate = dateNode ? dateNode.textContent.trim().replace(/\s+/g, " ") : "";
-      const parsedDate = parseDeadlineDate(dueDate);
-
-      if (!taskName || !dueDate || !parsedDate || parsedDate <= now) return null;
-
-      const moduleTitle = extractCourseNameFromEvent(event) || taskName;
-      let moduleAcronym = generateAcronym(moduleTitle);
-      if (moduleAcronym === "GEN") {
-        moduleAcronym = generateAcronym(taskName);
-      }
-
-      const cleanModuleName = getCleanModuleName(moduleTitle);
-      const url = extractDirectUrlFromEvent(event, taskLink);
-
-      return {
-        taskName: taskName,
-        dueDate: dueDate,
-        url: url,
-        moduleAcronym: moduleAcronym,
-        cleanModuleName: cleanModuleName,
-        moduleTitle: moduleTitle,
-      };
-    });
-
-    processedItems.forEach(function (item) {
-      if (!item) return;
-      const duplicate = deadlines.some(function (existing) {
-        return existing.taskName === item.taskName && existing.dueDate === item.dueDate && existing.url === item.url;
-      });
-      if (!duplicate) deadlines.push(item);
-    });
-
-    return deadlines;
+  async function scrapeDeadlines() {
+    return fetchUpcomingEvents();
   }
 
   function formatCountdown(msLeft) {
@@ -745,21 +758,7 @@
 
     rescanLink.addEventListener("click", async function (e) {
       e.preventDefault();
-      const fresh = await scrapeDeadlines();
-
-      if (Array.isArray(fresh)) {
-        saveDeadlines(fresh);
-      }
-
-      loadDeadlines(function (saved) {
-        const normalized = (saved || [])
-          .map(normalizeStoredItem)
-          .filter(function (item) {
-            return !!item;
-          });
-
-        renderDropdown(normalized);
-      });
+      await fetchUpcomingEvents();
     });
 
     rescanLi.appendChild(rescanLink);
@@ -926,18 +925,7 @@
         renderDropdown(normalizedCached);
       });
 
-      const scraped = await scrapeDeadlines();
-      if (Array.isArray(scraped)) {
-        saveDeadlines(scraped);
-
-        const normalizedScraped = scraped
-          .map(normalizeStoredItem)
-          .filter(function (item) {
-            return !!item;
-          });
-
-        renderDropdown(normalizedScraped);
-      }
+      await fetchUpcomingEvents();
     });
   }
 
