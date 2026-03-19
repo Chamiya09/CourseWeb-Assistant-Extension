@@ -378,6 +378,16 @@
   }
 
   async function scrapeDeadlines() {
+    const isDashboardUrl = window.location.href.indexOf("/my/") !== -1;
+    const hasTimelineContainer = !!document.querySelector(
+      '[data-region="timeline-view"], .block_calendar_upcoming, .block_calendar_month, .eventlist'
+    );
+
+    if (!isDashboardUrl && !hasTimelineContainer) {
+      // Strict page guard: skip scraping outside dashboard/timeline context.
+      return;
+    }
+
     const deadlines = [];
     const now = new Date();
 
@@ -1238,24 +1248,27 @@
       loadUserSettings(async function (storedSettings) {
         userSettings = storedSettings;
 
-        const scraped = await scrapeDeadlines();
-        if (Array.isArray(scraped)) {
-          saveDeadlines(scraped);
-        }
-
         loadDeadlines(function (saved) {
-          const normalized = saved
+          const normalizedCached = (saved || [])
             .map(normalizeStoredItem)
             .filter(function (item) {
               return !!item;
             });
 
-          const renderSource = normalized.length > 0
-            ? normalized
-            : (Array.isArray(scraped) ? scraped : []);
-
-          renderDropdown(renderSource);
+          renderDropdown(normalizedCached);
         });
+
+        const scraped = await scrapeDeadlines();
+        if (Array.isArray(scraped)) {
+          saveDeadlines(scraped);
+          const normalizedScraped = scraped
+            .map(normalizeStoredItem)
+            .filter(function (item) {
+              return !!item;
+            });
+
+          renderDropdown(normalizedScraped);
+        }
       });
     });
   }
