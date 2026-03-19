@@ -1,6 +1,6 @@
 // ============================================================
-// CourseWeb Assistant - content.js  v8.0
-// Upcoming-only deadlines with inline persistent settings.
+// CourseWeb Assistant - content.js  v9.0
+// Dashboard-only scraping with direct DOM extraction.
 // ============================================================
 
 (function () {
@@ -10,7 +10,6 @@
   const DEADLINE_WINDOW_DAYS = 7;
   const STORAGE_KEY = "cwa_deadlines";
   const SETTINGS_STORAGE_KEY = "cwa_user_settings";
-  const ACRONYM_CACHE_STORAGE_KEY = "cwa_acronym_cache";
 
   const CAMPUS_OPTIONS = [
     { value: "ALL", label: "All Centers" },
@@ -26,12 +25,6 @@
     { value: "Weekday", label: "Weekday" },
     { value: "Weekend", label: "Weekend" },
   ];
-
-  const moduleNameCache = {};
-  const acronymCache = {};
-  const pendingAcronymFetches = new Set();
-
-  let acronymCachePersistTimer = null;
 
   let countdownInterval = null;
   let currentDeadlines = [];
@@ -223,54 +216,11 @@
     if (!fullCourseName) return "General";
 
     let clean = String(fullCourseName).trim();
-
     clean = clean.replace(/^\s*[A-Za-z]{2,}\d+[A-Za-z0-9]*\s*-\s*/, "");
     clean = clean.replace(/\s*\[[^\]]*\]\s*$/, "");
     clean = clean.trim();
 
     return clean || "General";
-  }
-
-  function getCachedModuleData(url) {
-    if (!url) {
-      return {
-        moduleAcronym: "",
-        cleanModuleName: "",
-        resolvedUrl: "",
-      };
-    }
-
-    const cached = acronymCache[url];
-    if (!cached) {
-      return {
-        moduleAcronym: "",
-        cleanModuleName: "",
-        resolvedUrl: "",
-      };
-    }
-
-    if (typeof cached === "string") {
-      return {
-        moduleAcronym: cached,
-        cleanModuleName: "",
-        resolvedUrl: "",
-      };
-    }
-
-    return {
-      moduleAcronym: cached.moduleAcronym || "",
-      cleanModuleName: cached.cleanModuleName || "",
-      resolvedUrl: cached.resolvedUrl || "",
-    };
-  }
-
-  function setCachedModuleData(url, moduleAcronym, cleanModuleName, resolvedUrl) {
-    if (!url) return;
-    acronymCache[url] = {
-      moduleAcronym: moduleAcronym || "GEN",
-      cleanModuleName: cleanModuleName || "General",
-      resolvedUrl: resolvedUrl || "",
-    };
   }
 
   function normalizeCampusValue(campusValue) {
@@ -292,35 +242,6 @@
     chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: settings });
   }
 
-  function loadAcronymCache(callback) {
-    chrome.storage.local.get([ACRONYM_CACHE_STORAGE_KEY], function (result) {
-      const stored = result[ACRONYM_CACHE_STORAGE_KEY];
-      const map = (stored && typeof stored === "object") ? stored : {};
-
-      Object.keys(acronymCache).forEach(function (key) {
-        delete acronymCache[key];
-      });
-
-      Object.keys(map).forEach(function (key) {
-        acronymCache[key] = map[key];
-      });
-
-      callback(acronymCache);
-    });
-  }
-
-  function persistAcronymCache() {
-    chrome.storage.local.set({ [ACRONYM_CACHE_STORAGE_KEY]: acronymCache });
-  }
-
-  function queueAcronymCachePersist() {
-    if (acronymCachePersistTimer) return;
-    acronymCachePersistTimer = setTimeout(function () {
-      acronymCachePersistTimer = null;
-      persistAcronymCache();
-    }, 200);
-  }
-
   function loadUserSettings(callback) {
     chrome.storage.local.get([SETTINGS_STORAGE_KEY], function (result) {
       const stored = result[SETTINGS_STORAGE_KEY] || {};
@@ -331,13 +252,15 @@
     });
   }
 
-  function getSafeUrlSelector(url) {
-    if (!url) return "";
-    if (window.CSS && typeof window.CSS.escape === "function") {
-      return window.CSS.escape(url);
-    }
+  function saveDeadlines(deadlines) {
+    if (!Array.isArray(deadlines)) return;
+    chrome.storage.local.set({ [STORAGE_KEY]: deadlines });
+  }
 
-    return String(url).replace(/(["\\])/g, "\\$1");
+  function loadDeadlines(callback) {
+    chrome.storage.local.get([STORAGE_KEY], function (result) {
+      callback(result[STORAGE_KEY] || []);
+    });
   }
 
   function getStrictlyFilteredDeadlines(deadlines) {
@@ -376,8 +299,6 @@
         }
 
         if (containsOtherCampus) continue;
-
-        // Keep unlabeled generic tasks visible for specific campus selections.
         if (hasCampusLabel && titleUpper.indexOf(campus) === -1) continue;
       }
 
@@ -391,14 +312,61 @@
     return filtered;
   }
 
-  async function scrapeDeadlines() {
-    const isDashboardUrl = window.location.href.indexOf("/my/") !== -1;
-    const hasTimelineContainer = !!document.querySelector(
-      '[data-region="timeline-view"], .block_calendar_upcoming, .block_calendar_month, .eventlist'
-    );
+  function normalizeCourseText(rawText) {
+    const text = String(rawText || "").replace(/\s+/g, " ").trim();
+    if (!text) return "";
+    if (text.indexOf("·") !== -1) {
+      const parts = text.split("·");
+      if (parts.length > 1) {
+        return parts[1].trim();
+      }
+    }
+    return text;
+  }
 
-    if (!isDashboardUrl && !hasTimelineContainer) {
-      // Strict page guard: skip scraping outside dashboard/timeline context.
+  function extractCourseNameFromEvent(eventItem) {
+    if (!eventItem) return "";
+
+    const courseLink = eventItem.querySelector('a[href*="course/view.php?id="]');
+    const fromLink = normalizeCourseText(courseLink ? (courseLink.getAttribute("title") || courseLink.textContent) : "");
+    if (fromLink) return fromLink;
+
+    const smallTag = eventItem.querySelector("small.mb-0, small, .text-muted");
+    const fromSmall = normalizeCourseText(smallTag ? smallTag.textContent : "");
+    if (fromSmall) return fromSmall;
+
+    const subtitle = eventItem.querySelector(".text-muted");
+    return normalizeCourseText(subtitle ? subtitle.textContent : "");
+  }
+
+  function toAbsoluteUrl(href) {
+    if (!href) return "";
+    try {
+      return new URL(href, window.location.origin).href;
+    } catch (_e) {
+      return href;
+    }
+  }
+
+  function extractDirectUrlFromEvent(eventItem, fallbackLinkNode) {
+    if (!eventItem) return toAbsoluteUrl(fallbackLinkNode ? fallbackLinkNode.getAttribute("href") : "");
+
+    const directCandidates = Array.from(eventItem.querySelectorAll('a.card-link, a[href*="/mod/"]'));
+    for (let i = 0; i < directCandidates.length; i += 1) {
+      const href = directCandidates[i].getAttribute("href") || "";
+      if (/\/mod\//i.test(href)) {
+        return toAbsoluteUrl(href);
+      }
+    }
+
+    const fallbackHref = fallbackLinkNode ? fallbackLinkNode.getAttribute("href") : "";
+    return toAbsoluteUrl(fallbackHref);
+  }
+
+  async function scrapeDeadlines() {
+    const isDashboard = window.location.href.indexOf("/my/") !== -1 || !!document.querySelector(".block_timeline, .block_myoverview");
+    if (!isDashboard) {
+      // Do not scrape or modify storage outside dashboard context.
       return;
     }
 
@@ -407,23 +375,8 @@
 
     const eventItems = document.querySelectorAll('.event[data-eventtype-course="1"]');
     if (!eventItems || eventItems.length === 0) {
-      // Non-dashboard pages often have no timeline events; keep existing storage as-is.
-      return;
-    }
-
-    function extractCourseNameFromEvent(eventItem) {
-      if (!eventItem) return "";
-
-      const smallTag = eventItem.querySelector("small.mb-0");
-      if (!smallTag || !smallTag.textContent) return "";
-
-      const text = smallTag.textContent.trim();
-      if (text.indexOf("·") === -1) return "";
-
-      const pieces = text.split("·");
-      if (pieces.length < 2) return "";
-
-      return pieces[1].trim();
+      // On dashboard with no events this is a valid empty snapshot.
+      return [];
     }
 
     const processedItems = Array.from(eventItems).map(function (event) {
@@ -431,7 +384,7 @@
       const isSiteEvent = event.getAttribute("data-eventtype-site") === "1";
       if (!isCourseEvent || isSiteEvent) return null;
 
-      const taskLink = event.querySelector("h4 a, [data-region='event-name'] a, .eventname a, a[href*='assign']");
+      const taskLink = event.querySelector("h4 a, [data-region='event-name'] a, .eventname a, a[href]");
       const taskNameRaw = taskLink
         ? (taskLink.getAttribute("title") || taskLink.textContent || "")
         : ((event.querySelector("h4") || {}).textContent || "");
@@ -445,43 +398,24 @@
       const dueDate = dateNode ? dateNode.textContent.trim().replace(/\s+/g, " ") : "";
       const parsedDate = parseDeadlineDate(dueDate);
 
-      let url = "";
-      if (taskLink && taskLink.getAttribute("href")) {
-        try {
-          url = new URL(taskLink.getAttribute("href"), window.location.origin).href;
-        } catch (_e) {
-          url = taskLink.getAttribute("href");
-        }
-      }
-
       if (!taskName || !dueDate || !parsedDate || parsedDate <= now) return null;
 
-      const fallbackTitle = extractCourseNameFromEvent(event);
-      const fallbackCleanModuleName = getCleanModuleName(fallbackTitle);
-      const cachedData = getCachedModuleData(url);
-      const initialAcronym = cachedData.moduleAcronym || "...";
-      const cleanModuleName = cachedData.cleanModuleName || fallbackCleanModuleName;
-      const moduleTitle = fallbackTitle;
-      const resolvedUrl = cachedData.resolvedUrl || url;
-
-      const details = {
-        moduleAcronym: initialAcronym,
-        cleanModuleName: cleanModuleName,
-        moduleTitle: moduleTitle,
-        resolvedUrl: resolvedUrl,
-      };
-
-      if (url) {
-        moduleNameCache[url] = details;
+      const moduleTitle = extractCourseNameFromEvent(event) || taskName;
+      let moduleAcronym = generateAcronym(moduleTitle);
+      if (moduleAcronym === "GEN") {
+        moduleAcronym = generateAcronym(taskName);
       }
+
+      const cleanModuleName = getCleanModuleName(moduleTitle);
+      const url = extractDirectUrlFromEvent(event, taskLink);
 
       return {
         taskName: taskName,
         dueDate: dueDate,
-        url: details.resolvedUrl || url,
-        moduleAcronym: details.moduleAcronym,
-        cleanModuleName: details.cleanModuleName,
-        moduleTitle: details.moduleTitle,
+        url: url,
+        moduleAcronym: moduleAcronym,
+        cleanModuleName: cleanModuleName,
+        moduleTitle: moduleTitle,
       };
     });
 
@@ -494,341 +428,6 @@
     });
 
     return deadlines;
-  }
-
-  async function fetchExactModuleDetails(url, fallbackTitle) {
-    if (!url) {
-      return {
-        moduleTitle: fallbackTitle || "",
-        moduleAcronym: generateAcronym(fallbackTitle),
-        cleanModuleName: getCleanModuleName(fallbackTitle),
-        resolvedUrl: url,
-      };
-    }
-
-    try {
-      const response = await fetch(url, { credentials: "include" });
-      if (!response.ok) {
-        return {
-          moduleTitle: fallbackTitle || "",
-          moduleAcronym: generateAcronym(fallbackTitle),
-          cleanModuleName: getCleanModuleName(fallbackTitle),
-          resolvedUrl: url,
-        };
-      }
-
-      const html = await response.text();
-      const doc = new DOMParser().parseFromString(html, "text/html");
-
-      const breadcrumbRoot = doc.querySelector("ol.breadcrumb, nav[aria-label='Breadcrumb']");
-      const courseLink = breadcrumbRoot
-        ? breadcrumbRoot.querySelector('a[href*="course/view.php?id="]')
-        : doc.querySelector('.breadcrumb-item a[href*="course/view.php?id="]');
-      let fullCourseName = courseLink
-        ? ((courseLink.getAttribute("title") || courseLink.textContent || "").trim())
-        : "";
-
-      let directLinkNode = null;
-      if (breadcrumbRoot) {
-        const breadcrumbLinks = Array.from(breadcrumbRoot.querySelectorAll("a[href]"));
-        for (let i = breadcrumbLinks.length - 1; i >= 0; i -= 1) {
-          const href = breadcrumbLinks[i].getAttribute("href") || "";
-          if (/\/mod\/[A-Za-z0-9_\-]+\//i.test(href) && /view\.php/i.test(href)) {
-            directLinkNode = breadcrumbLinks[i];
-            break;
-          }
-        }
-      }
-
-      if (!directLinkNode) {
-        directLinkNode = doc.querySelector('a[href*="/mod/"][href*="view.php"]');
-      }
-
-      let resolvedUrl = url;
-      if (directLinkNode && directLinkNode.getAttribute("href")) {
-        try {
-          resolvedUrl = new URL(directLinkNode.getAttribute("href"), window.location.origin).href;
-        } catch (_e) {
-          resolvedUrl = directLinkNode.getAttribute("href");
-        }
-      }
-
-      if (!fullCourseName) {
-        fullCourseName = fallbackTitle || "";
-      }
-
-      return {
-        moduleTitle: fullCourseName,
-        moduleAcronym: generateAcronym(fullCourseName),
-        cleanModuleName: getCleanModuleName(fullCourseName),
-        resolvedUrl: resolvedUrl,
-      };
-    } catch (_error) {
-      return {
-        moduleTitle: fallbackTitle || "",
-        moduleAcronym: generateAcronym(fallbackTitle),
-        cleanModuleName: getCleanModuleName(fallbackTitle),
-        resolvedUrl: url,
-      };
-    }
-  }
-
-  function updateBadgeAcronym(url, acronym) {
-    if (!url || !acronym) return;
-
-    const safe = getSafeUrlSelector(url);
-    if (!safe) return;
-
-    const badge = document.querySelector('.cwa-module-acronym-badge[data-acronym-url="' + safe + '"]');
-    if (badge) {
-      badge.textContent = acronym;
-    }
-
-    document.querySelectorAll('.cwa-module-acronym-badge[data-acronym-url="' + safe + '"]').forEach(function (node) {
-      node.textContent = acronym;
-    });
-  }
-
-  function updateModuleNameText(url, cleanModuleName) {
-    if (!url || !cleanModuleName) return;
-
-    const safe = getSafeUrlSelector(url);
-    if (!safe) return;
-
-    document.querySelectorAll('.cwa-module-name-line[data-module-url="' + safe + '"]').forEach(function (node) {
-      node.textContent = cleanModuleName;
-      node.setAttribute("title", cleanModuleName);
-    });
-  }
-
-  function updateDeadlinesWithResolvedUrl(oldUrl, newUrl) {
-    if (!oldUrl || !newUrl || oldUrl === newUrl) return;
-
-    currentDeadlines = (currentDeadlines || []).map(function (item) {
-      if (!item || item.url !== oldUrl) return item;
-      return Object.assign({}, item, { url: newUrl });
-    });
-
-    loadDeadlines(function (saved) {
-      const list = Array.isArray(saved) ? saved : [];
-      const updated = list.map(function (item) {
-        if (!item || item.url !== oldUrl) return item;
-        return Object.assign({}, item, { url: newUrl });
-      });
-      saveDeadlines(updated);
-    });
-
-    const oldCached = getCachedModuleData(oldUrl);
-    if (oldCached.moduleAcronym || oldCached.cleanModuleName) {
-      setCachedModuleData(oldUrl, oldCached.moduleAcronym, oldCached.cleanModuleName, newUrl);
-      setCachedModuleData(newUrl, oldCached.moduleAcronym, oldCached.cleanModuleName, newUrl);
-      queueAcronymCachePersist();
-    }
-
-    const safeOld = getSafeUrlSelector(oldUrl);
-    const safeNew = getSafeUrlSelector(newUrl);
-    if (!safeOld || !safeNew) return;
-
-    document.querySelectorAll('.cwa-module-acronym-badge[data-acronym-url="' + safeOld + '"]').forEach(function (badge) {
-      badge.setAttribute("data-acronym-url", newUrl);
-    });
-
-    document.querySelectorAll('.cwa-module-name-line[data-module-url="' + safeOld + '"]').forEach(function (line) {
-      line.setAttribute("data-module-url", newUrl);
-    });
-
-    document.querySelectorAll('[data-module-url="' + safeOld + '"]').forEach(function (node) {
-      node.setAttribute("data-module-url", newUrl);
-    });
-  }
-
-  function applyAcronymToState(url, acronym, moduleTitle, cleanModuleName) {
-    if (!url || !acronym) return;
-
-    currentDeadlines = (currentDeadlines || []).map(function (item) {
-      if (!item || item.url !== url) return item;
-      return Object.assign({}, item, {
-        moduleAcronym: acronym,
-        moduleTitle: moduleTitle || item.moduleTitle || "",
-        cleanModuleName: cleanModuleName || item.cleanModuleName || getCleanModuleName(moduleTitle || item.moduleTitle || ""),
-      });
-    });
-
-    saveDeadlines(currentDeadlines);
-  }
-
-  async function updateMissingAcronymsInBackground(items) {
-    async function resolveUniversalDirectUrl(candidateUrl) {
-      if (!candidateUrl) return "";
-      try {
-        const urlObj = new URL(candidateUrl, window.location.origin);
-        const eventHash = urlObj.hash || "";
-        const eventIdMatch = eventHash.match(/\d+/);
-        const eventId = eventIdMatch ? eventIdMatch[0] : null;
-
-        const response = await fetch(urlObj.href, { credentials: "include" });
-        if (!response.ok) return "";
-
-        const html = await response.text();
-        const doc = new DOMParser().parseFromString(html, "text/html");
-        let eventWrapper = null;
-        if (eventId) {
-          eventWrapper = doc.querySelector('[data-event-id="' + eventId + '"]') || doc.getElementById('event_' + eventId);
-        }
-
-        let directLinkNode = null;
-        if (eventWrapper) {
-          directLinkNode = eventWrapper.querySelector('a[href*="/mod/"][href*="view.php"]');
-        } else {
-          // Fallback when Moodle markup differs; can be ambiguous for same-day pages.
-          directLinkNode = doc.querySelector('a[href*="/mod/"][href*="view.php"]');
-        }
-
-        if (!directLinkNode || !directLinkNode.getAttribute("href")) return "";
-
-        try {
-          return new URL(directLinkNode.getAttribute("href"), window.location.origin).href;
-        } catch (_e) {
-          return directLinkNode.getAttribute("href") || "";
-        }
-      } catch (_error) {
-        return "";
-      }
-    }
-
-    function updateLiveDeadlineAnchor(oldUrl, newUrl) {
-      if (!oldUrl || !newUrl || oldUrl === newUrl) return;
-
-      const safeOld = getSafeUrlSelector(oldUrl);
-      if (!safeOld) return;
-
-      document.querySelectorAll('#cwa-deadlines-menu a.list-group-item-action[href="' + safeOld + '"]').forEach(function (anchor) {
-        anchor.setAttribute("href", newUrl);
-      });
-
-      document.querySelectorAll('.cwa-module-acronym-badge[data-acronym-url="' + safeOld + '"]').forEach(function (badge) {
-        const anchor = badge.closest("a.list-group-item-action");
-        if (anchor) {
-          anchor.setAttribute("href", newUrl);
-        }
-      });
-
-      document.querySelectorAll('.cwa-module-name-line[data-module-url="' + safeOld + '"]').forEach(function (line) {
-        const anchor = line.closest("a.list-group-item-action");
-        if (anchor) {
-          anchor.setAttribute("href", newUrl);
-        }
-      });
-    }
-
-    function isCalendarEventUrl(url) {
-      return /\/calendar\/view\.php/i.test(String(url || ""));
-    }
-
-    const queue = Array.isArray(items) ? items : [];
-    for (let i = 0; i < queue.length; i += 1) {
-      const item = queue[i];
-      if (!item || !item.url) continue;
-
-      const cachedData = getCachedModuleData(item.url);
-      const hasFullCachedModuleData = !!(cachedData.moduleAcronym && cachedData.cleanModuleName);
-      const shouldForceDirectResolution = isCalendarEventUrl(item.url);
-
-      if (shouldForceDirectResolution && cachedData.resolvedUrl && cachedData.resolvedUrl !== item.url) {
-        updateDeadlinesWithResolvedUrl(item.url, cachedData.resolvedUrl);
-        updateLiveDeadlineAnchor(item.url, cachedData.resolvedUrl);
-      }
-
-      if (hasFullCachedModuleData && !shouldForceDirectResolution) continue;
-      if (pendingAcronymFetches.has(item.url)) continue;
-
-      pendingAcronymFetches.add(item.url);
-
-      fetchExactModuleDetails(item.url, item.moduleTitle || "")
-        .then(async function (details) {
-          let resolvedUrl = details.resolvedUrl || item.url;
-          if (resolvedUrl === item.url) {
-            const universalDirectUrl = await resolveUniversalDirectUrl(item.url);
-            if (universalDirectUrl) {
-              resolvedUrl = universalDirectUrl;
-            }
-          }
-
-          const exactAcronym = details.moduleAcronym || generateAcronym(item.moduleTitle || "");
-          const cleanModuleName = details.cleanModuleName || getCleanModuleName(details.moduleTitle || item.moduleTitle || "");
-          const hasDirectUrl = resolvedUrl && resolvedUrl !== item.url;
-
-          setCachedModuleData(item.url, exactAcronym, cleanModuleName, resolvedUrl);
-          if (hasDirectUrl) {
-            setCachedModuleData(resolvedUrl, exactAcronym, cleanModuleName, resolvedUrl);
-            updateDeadlinesWithResolvedUrl(item.url, resolvedUrl);
-            updateLiveDeadlineAnchor(item.url, resolvedUrl);
-
-            currentDeadlines = (currentDeadlines || []).map(function (deadline) {
-              if (!deadline || deadline.url !== item.url) return deadline;
-              return Object.assign({}, deadline, {
-                url: resolvedUrl,
-                cleanModuleName: cleanModuleName,
-              });
-            });
-            saveDeadlines(currentDeadlines);
-
-            loadDeadlines(function (saved) {
-              const list = Array.isArray(saved) ? saved : [];
-              const updated = list.map(function (deadline) {
-                if (!deadline || deadline.url !== item.url) return deadline;
-                return Object.assign({}, deadline, {
-                  url: resolvedUrl,
-                  cleanModuleName: cleanModuleName,
-                });
-              });
-              saveDeadlines(updated);
-            });
-          }
-
-          queueAcronymCachePersist();
-
-          updateBadgeAcronym(item.url, exactAcronym);
-          updateModuleNameText(item.url, cleanModuleName);
-          if (hasDirectUrl) {
-            updateBadgeAcronym(resolvedUrl, exactAcronym);
-            updateModuleNameText(resolvedUrl, cleanModuleName);
-          }
-
-          applyAcronymToState(item.url, exactAcronym, details.moduleTitle, cleanModuleName);
-          if (hasDirectUrl) {
-            applyAcronymToState(resolvedUrl, exactAcronym, details.moduleTitle, cleanModuleName);
-          }
-
-          moduleNameCache[item.url] = {
-            moduleAcronym: exactAcronym,
-            cleanModuleName: cleanModuleName,
-            moduleTitle: details.moduleTitle || item.moduleTitle || "",
-            resolvedUrl: resolvedUrl,
-          };
-
-          if (hasDirectUrl) {
-            moduleNameCache[resolvedUrl] = moduleNameCache[item.url];
-          }
-        })
-        .catch(function () {
-          // Keep fallback acronym if background fetch fails.
-        })
-        .finally(function () {
-          pendingAcronymFetches.delete(item.url);
-        });
-    }
-  }
-
-  function saveDeadlines(deadlines) {
-    if (!Array.isArray(deadlines)) return;
-    chrome.storage.local.set({ [STORAGE_KEY]: deadlines });
-  }
-
-  function loadDeadlines(callback) {
-    chrome.storage.local.get([STORAGE_KEY], function (result) {
-      callback(result[STORAGE_KEY] || []);
-    });
   }
 
   function formatCountdown(msLeft) {
@@ -881,10 +480,6 @@
     badge.className = "badge rounded-pill bg-primary me-2";
     badge.style.cssText = "font-size: 0.75em;";
     badge.textContent = item.moduleAcronym || "GEN";
-    badge.classList.add("cwa-module-acronym-badge");
-    if (item.url) {
-      badge.setAttribute("data-acronym-url", item.url);
-    }
 
     const title = document.createElement("span");
     title.style.cssText = "font-weight:600; font-size:.88rem; color:#0d6efd; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:280px; display:inline-block;";
@@ -898,9 +493,6 @@
     const moduleRow = document.createElement("div");
     moduleRow.className = "text-muted mt-1";
     moduleRow.style.cssText = "font-size: 0.8em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;";
-    if (item.url) {
-      moduleRow.setAttribute("data-module-url", item.url);
-    }
     moduleRow.title = item.cleanModuleName || getCleanModuleName(item.moduleTitle || "");
 
     const moduleIcon = document.createElement("i");
@@ -908,10 +500,6 @@
     moduleIcon.setAttribute("aria-hidden", "true");
 
     const moduleText = document.createElement("span");
-    moduleText.className = "cwa-module-name-line";
-    if (item.url) {
-      moduleText.setAttribute("data-module-url", item.url);
-    }
     moduleText.textContent = item.cleanModuleName || getCleanModuleName(item.moduleTitle || "");
 
     moduleRow.appendChild(moduleIcon);
@@ -1294,8 +882,6 @@
 
     startCountdownTicker();
     updateNotificationBadge(currentDeadlines);
-
-    updateMissingAcronymsInBackground(currentDeadlines);
   }
 
   function normalizeStoredItem(item) {
@@ -1327,32 +913,31 @@
 
     injectStyles();
 
-    loadAcronymCache(function () {
-      loadUserSettings(async function (storedSettings) {
-        userSettings = storedSettings;
+    loadUserSettings(async function (storedSettings) {
+      userSettings = storedSettings;
 
-        loadDeadlines(function (saved) {
-          const normalizedCached = (saved || [])
-            .map(normalizeStoredItem)
-            .filter(function (item) {
-              return !!item;
-            });
+      loadDeadlines(function (saved) {
+        const normalizedCached = (saved || [])
+          .map(normalizeStoredItem)
+          .filter(function (item) {
+            return !!item;
+          });
 
-          renderDropdown(normalizedCached);
-        });
-
-        const scraped = await scrapeDeadlines();
-        if (Array.isArray(scraped)) {
-          saveDeadlines(scraped);
-          const normalizedScraped = scraped
-            .map(normalizeStoredItem)
-            .filter(function (item) {
-              return !!item;
-            });
-
-          renderDropdown(normalizedScraped);
-        }
+        renderDropdown(normalizedCached);
       });
+
+      const scraped = await scrapeDeadlines();
+      if (Array.isArray(scraped)) {
+        saveDeadlines(scraped);
+
+        const normalizedScraped = scraped
+          .map(normalizeStoredItem)
+          .filter(function (item) {
+            return !!item;
+          });
+
+        renderDropdown(normalizedScraped);
+      }
     });
   }
 
