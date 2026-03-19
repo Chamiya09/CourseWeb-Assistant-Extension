@@ -648,13 +648,45 @@
       }
     }
 
+    function updateLiveDeadlineAnchor(oldUrl, newUrl) {
+      if (!oldUrl || !newUrl || oldUrl === newUrl) return;
+
+      const safeOld = getSafeUrlSelector(oldUrl);
+      if (!safeOld) return;
+
+      document.querySelectorAll('#cwa-deadlines-menu a.list-group-item-action[href="' + safeOld + '"]').forEach(function (anchor) {
+        anchor.setAttribute("href", newUrl);
+      });
+
+      document.querySelectorAll('.cwa-module-acronym-badge[data-acronym-url="' + safeOld + '"]').forEach(function (badge) {
+        const anchor = badge.closest("a.list-group-item-action");
+        if (anchor) {
+          anchor.setAttribute("href", newUrl);
+        }
+      });
+
+      document.querySelectorAll('.cwa-module-name-line[data-module-url="' + safeOld + '"]').forEach(function (line) {
+        const anchor = line.closest("a.list-group-item-action");
+        if (anchor) {
+          anchor.setAttribute("href", newUrl);
+        }
+      });
+    }
+
+    function isCalendarEventUrl(url) {
+      return /\/calendar\/view\.php/i.test(String(url || ""));
+    }
+
     const queue = Array.isArray(items) ? items : [];
     for (let i = 0; i < queue.length; i += 1) {
       const item = queue[i];
       if (!item || !item.url) continue;
+
       const cachedData = getCachedModuleData(item.url);
       const hasFullCachedModuleData = !!(cachedData.moduleAcronym && cachedData.cleanModuleName);
-      if (hasFullCachedModuleData) continue;
+      const shouldForceDirectResolution = isCalendarEventUrl(item.url);
+
+      if (hasFullCachedModuleData && !shouldForceDirectResolution) continue;
       if (pendingAcronymFetches.has(item.url)) continue;
 
       pendingAcronymFetches.add(item.url);
@@ -677,18 +709,7 @@
           if (hasDirectUrl) {
             setCachedModuleData(resolvedUrl, exactAcronym, cleanModuleName);
             updateDeadlinesWithResolvedUrl(item.url, resolvedUrl);
-
-            // Live DOM update: ensure open dropdown links navigate directly to activity pages.
-            document.querySelectorAll('#cwa-deadlines-menu a.list-group-item-action[href="' + getSafeUrlSelector(item.url) + '"]').forEach(function (anchor) {
-              anchor.setAttribute("href", resolvedUrl);
-            });
-
-            document.querySelectorAll('.cwa-module-acronym-badge[data-acronym-url="' + getSafeUrlSelector(item.url) + '"]').forEach(function (badge) {
-              const anchor = badge.closest("a.list-group-item-action");
-              if (anchor) {
-                anchor.setAttribute("href", resolvedUrl);
-              }
-            });
+            updateLiveDeadlineAnchor(item.url, resolvedUrl);
 
             currentDeadlines = (currentDeadlines || []).map(function (deadline) {
               if (!deadline || deadline.url !== item.url) return deadline;
