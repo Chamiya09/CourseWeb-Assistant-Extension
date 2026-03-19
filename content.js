@@ -341,7 +341,8 @@
 
     const batch = normalizeBatchValue(userSettings.batch);
     const campus = normalizeCampusValue(userSettings.campus);
-    const otherCampuses = ["MALABE", "KANDY", "MATARA", "NORTHERN", "PRORATA"].filter(function (c) {
+    const campusModifiers = ["MALABE", "KANDY", "MATARA", "NORTHERN", "PRORATA", "ALL CENTERS", "ALL CENTER"];
+    const otherCampuses = campusModifiers.filter(function (c) {
       return c !== campus.toUpperCase();
     });
 
@@ -356,7 +357,11 @@
       if (batch === "Weekday" && titleUpper.indexOf("WEEKEND") !== -1) continue;
       if (batch === "Weekend" && titleUpper.indexOf("WEEKDAY") !== -1) continue;
 
-      if (campus !== "ALL" && titleUpper.indexOf("ALL CENTERS") === -1) {
+      if (campus !== "ALL") {
+        const hasCampusLabel = campusModifiers.some(function (modifier) {
+          return titleUpper.indexOf(modifier) !== -1;
+        });
+
         let containsOtherCampus = false;
         for (let j = 0; j < otherCampuses.length; j += 1) {
           if (titleUpper.indexOf(otherCampuses[j]) !== -1) {
@@ -364,7 +369,11 @@
             break;
           }
         }
+
         if (containsOtherCampus) continue;
+
+        // Keep unlabeled generic tasks visible for specific campus selections.
+        if (hasCampusLabel && titleUpper.indexOf(campus) === -1) continue;
       }
 
       filtered.push(item);
