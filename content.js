@@ -236,6 +236,7 @@
       return {
         moduleAcronym: "",
         cleanModuleName: "",
+        resolvedUrl: "",
       };
     }
 
@@ -244,6 +245,7 @@
       return {
         moduleAcronym: "",
         cleanModuleName: "",
+        resolvedUrl: "",
       };
     }
 
@@ -251,20 +253,23 @@
       return {
         moduleAcronym: cached,
         cleanModuleName: "",
+        resolvedUrl: "",
       };
     }
 
     return {
       moduleAcronym: cached.moduleAcronym || "",
       cleanModuleName: cached.cleanModuleName || "",
+      resolvedUrl: cached.resolvedUrl || "",
     };
   }
 
-  function setCachedModuleData(url, moduleAcronym, cleanModuleName) {
+  function setCachedModuleData(url, moduleAcronym, cleanModuleName, resolvedUrl) {
     if (!url) return;
     acronymCache[url] = {
       moduleAcronym: moduleAcronym || "GEN",
       cleanModuleName: cleanModuleName || "General",
+      resolvedUrl: resolvedUrl || "",
     };
   }
 
@@ -454,15 +459,16 @@
       const fallbackTitle = extractCourseNameFromEvent(event);
       const fallbackCleanModuleName = getCleanModuleName(fallbackTitle);
       const cachedData = getCachedModuleData(url);
-      const moduleAcronym = cachedData.moduleAcronym || generateAcronym(fallbackTitle);
+      const initialAcronym = cachedData.moduleAcronym || "...";
       const cleanModuleName = cachedData.cleanModuleName || fallbackCleanModuleName;
       const moduleTitle = fallbackTitle;
+      const resolvedUrl = cachedData.resolvedUrl || url;
 
       const details = {
-        moduleAcronym: moduleAcronym,
+        moduleAcronym: initialAcronym,
         cleanModuleName: cleanModuleName,
         moduleTitle: moduleTitle,
-        resolvedUrl: url,
+        resolvedUrl: resolvedUrl,
       };
 
       if (url) {
@@ -514,12 +520,30 @@
       const html = await response.text();
       const doc = new DOMParser().parseFromString(html, "text/html");
 
-      const courseLink = doc.querySelector('.breadcrumb-item a[href*="course/view.php?id="]');
+      const breadcrumbRoot = doc.querySelector("ol.breadcrumb, nav[aria-label='Breadcrumb']");
+      const courseLink = breadcrumbRoot
+        ? breadcrumbRoot.querySelector('a[href*="course/view.php?id="]')
+        : doc.querySelector('.breadcrumb-item a[href*="course/view.php?id="]');
       let fullCourseName = courseLink
         ? ((courseLink.getAttribute("title") || courseLink.textContent || "").trim())
         : "";
 
-      const directLinkNode = doc.querySelector('a[href*="/mod/assign/view.php"], a[href*="/mod/quiz/view.php"], a[href*="/mod/url/view.php"]');
+      let directLinkNode = null;
+      if (breadcrumbRoot) {
+        const breadcrumbLinks = Array.from(breadcrumbRoot.querySelectorAll("a[href]"));
+        for (let i = breadcrumbLinks.length - 1; i >= 0; i -= 1) {
+          const href = breadcrumbLinks[i].getAttribute("href") || "";
+          if (/\/mod\/[A-Za-z0-9_\-]+\//i.test(href) && /view\.php/i.test(href)) {
+            directLinkNode = breadcrumbLinks[i];
+            break;
+          }
+        }
+      }
+
+      if (!directLinkNode) {
+        directLinkNode = doc.querySelector('a[href*="/mod/"][href*="view.php"]');
+      }
+
       let resolvedUrl = url;
       if (directLinkNode && directLinkNode.getAttribute("href")) {
         try {
@@ -593,6 +617,13 @@
       });
       saveDeadlines(updated);
     });
+
+    const oldCached = getCachedModuleData(oldUrl);
+    if (oldCached.moduleAcronym || oldCached.cleanModuleName) {
+      setCachedModuleData(oldUrl, oldCached.moduleAcronym, oldCached.cleanModuleName, newUrl);
+      setCachedModuleData(newUrl, oldCached.moduleAcronym, oldCached.cleanModuleName, newUrl);
+      queueAcronymCachePersist();
+    }
 
     const safeOld = getSafeUrlSelector(oldUrl);
     const safeNew = getSafeUrlSelector(newUrl);
@@ -703,6 +734,11 @@
       const hasFullCachedModuleData = !!(cachedData.moduleAcronym && cachedData.cleanModuleName);
       const shouldForceDirectResolution = isCalendarEventUrl(item.url);
 
+      if (shouldForceDirectResolution && cachedData.resolvedUrl && cachedData.resolvedUrl !== item.url) {
+        updateDeadlinesWithResolvedUrl(item.url, cachedData.resolvedUrl);
+        updateLiveDeadlineAnchor(item.url, cachedData.resolvedUrl);
+      }
+
       if (hasFullCachedModuleData && !shouldForceDirectResolution) continue;
       if (pendingAcronymFetches.has(item.url)) continue;
 
@@ -722,9 +758,9 @@
           const cleanModuleName = details.cleanModuleName || getCleanModuleName(details.moduleTitle || item.moduleTitle || "");
           const hasDirectUrl = resolvedUrl && resolvedUrl !== item.url;
 
-          setCachedModuleData(item.url, exactAcronym, cleanModuleName);
+          setCachedModuleData(item.url, exactAcronym, cleanModuleName, resolvedUrl);
           if (hasDirectUrl) {
-            setCachedModuleData(resolvedUrl, exactAcronym, cleanModuleName);
+            setCachedModuleData(resolvedUrl, exactAcronym, cleanModuleName, resolvedUrl);
             updateDeadlinesWithResolvedUrl(item.url, resolvedUrl);
             updateLiveDeadlineAnchor(item.url, resolvedUrl);
 
