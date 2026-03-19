@@ -630,12 +630,29 @@
     async function resolveUniversalDirectUrl(candidateUrl) {
       if (!candidateUrl) return "";
       try {
-        const response = await fetch(candidateUrl, { credentials: "include" });
+        const urlObj = new URL(candidateUrl, window.location.origin);
+        const eventHash = urlObj.hash || "";
+        const eventIdMatch = eventHash.match(/\d+/);
+        const eventId = eventIdMatch ? eventIdMatch[0] : null;
+
+        const response = await fetch(urlObj.href, { credentials: "include" });
         if (!response.ok) return "";
 
         const html = await response.text();
         const doc = new DOMParser().parseFromString(html, "text/html");
-        const directLinkNode = doc.querySelector('a[href*="/mod/"][href*="view.php"]');
+        let eventWrapper = null;
+        if (eventId) {
+          eventWrapper = doc.querySelector('[data-event-id="' + eventId + '"]') || doc.getElementById('event_' + eventId);
+        }
+
+        let directLinkNode = null;
+        if (eventWrapper) {
+          directLinkNode = eventWrapper.querySelector('a[href*="/mod/"][href*="view.php"]');
+        } else {
+          // Fallback when Moodle markup differs; can be ambiguous for same-day pages.
+          directLinkNode = doc.querySelector('a[href*="/mod/"][href*="view.php"]');
+        }
+
         if (!directLinkNode || !directLinkNode.getAttribute("href")) return "";
 
         try {
